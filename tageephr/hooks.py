@@ -247,3 +247,19 @@ app_license = "mit"
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
+# ─── Tageep HRMS (تطبيق الموارد البشرية المستقل) ───
+app_include_css = None
+website_route_rules = [
+	{"from_route": "/hrpro", "to_route": "hrpro"},
+	{"from_route": "/hrpro/<path:app_path>", "to_route": "hrpro"},
+]
+after_install = "tageephr.hrpro.install.after_install"
+
+add_to_apps_screen = [
+	{
+		"name": "tageephr",
+		"logo": "/assets/tageephr/hrpro/assets/app.css",
+		"title": "Tageep HRMS",
+		"route": "/hrpro",
+	}
+]

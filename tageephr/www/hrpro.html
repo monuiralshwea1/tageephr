@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1526">
+    <title>Tageep HRMS — نظام إدارة الموارد البشرية</title>
+    <link rel="stylesheet" href="/assets/tageephr/hrpro/assets/app.css?v=3.0.6">
+    <script>
+        window.HRPRO_API_BASE = '/api/method/tageephr.hrpro.api.dispatch';
+        window.HRPRO_CSRF = '{{ csrf_token }}';
+    </script>
+    <style>
+        .navbar, .footer, #navbar-breadcrumbs, .page-head { display: none !important; }
+        body { margin: 0; }
+    </style>
+
+</head>
+<body>
+    <div id="boot" class="boot">
+        <div class="boot-inner">
+            <div class="boot-logo">T</div>
+            <strong style="font-size:17px">Tageep HRMS</strong>
+            <div class="small" style="color:#8fa3bd;margin-top:4px">جارٍ تحميل نظام الموارد البشرية</div>
+            <div class="spinner"></div>
+        </div>
+    </div>
+
+    <div id="licenseGate" class="license-gate hidden">
+        <div class="license-card">
+            <div class="license-badge">T</div>
+            <h1>تفعيل نظام Tageep HRMS</h1>
+            <p class="muted" style="margin:6px 0 18px">هذه النسخة تحتاج إلى ترخيص للعمل. انسخ الرقم التسلسلي للجهاز وأرسله إلى المطوّر للحصول على مفتاح الترخيص.</p>
+            <div class="license-machine">
+                <div class="small muted">الرقم التسلسلي لهذا الجهاز</div>
+                <div class="license-serial" id="licenseSerial" dir="ltr">—</div>
+                <button class="btn btn-sm" id="licenseCopy" type="button">نسخ الرقم التسلسلي</button>
+            </div>
+            <div class="small text-warning" id="licenseHint" style="margin-bottom:12px"></div>
+            <div class="field">
+                <label for="licenseKey">مفتاح الترخيص</label>
+                <textarea id="licenseKey" rows="4" placeholder="ألصق مفتاح الترخيص هنا (نص طويل يبدأ بحروف وأرقام)" style="font-size:11px;direction:ltr;text-align:left"></textarea>
+            </div>
+            <div class="auth-error" id="licenseError"></div>
+            <button class="btn btn-primary w-full" id="licenseActivate" type="button">تفعيل النظام</button>
+            <div class="license-foot">
+                <div>الترخيص مرتبط بعتاد هذا الجهاز — لا يعمل عند نسخه إلى جهاز آخر.</div>
+                <div>للتجديد أو الدعم: أرسل الرقم التسلسلي أعلاه إلى المطوّر.</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="auth" class="auth hidden">
+        <div class="auth-brand">
+            <div>
+                <div class="brand" style="padding:0 0 10px">
+                    <div class="brand-mark">T</div>
+                    <div class="brand-text"><strong style="color:#fff">Tageep HRMS</strong><small>Enterprise HR Platform</small></div>
+                </div>
+                <h1>نظام موارد بشرية متكامل وذكي<br>يدير الحضور والرواتب والإجازات</h1>
+                <p>منصة موحدة للفروع والأقسام والمستخدمين، مع محرك بصمات ومعالجة تأخيرات وتحويل تلقائي للساعات إلى إجازات، ومسير رواتب مرن، وتقارير قابلة للتخصيص.</p>
+                <div class="auth-features" id="authFeatures"></div>
+            </div>
+            <div class="small" style="color:#5d7a92">بياناتك محمية بتشفير AES-256-GCM وتخزين آمن لكلمات المرور.</div>
+        </div>
+        <div class="auth-panel">
+            <div class="auth-card">
+                <div class="logo">T</div>
+                <h2 id="authTitle">تسجيل الدخول</h2>
+                <div class="sub" id="authSub">أدخل بيانات حسابك للوصول إلى النظام</div>
+                <div id="authError" class="auth-error"></div>
+                <form id="loginForm">
+                    <div class="field">
+                        <label for="loginUsername">اسم المستخدم</label>
+                        <input id="loginUsername" autocomplete="username" placeholder="اسم المستخدم" required>
+                    </div>
+                    <div class="field">
+                        <label for="loginPassword">كلمة المرور</label>
+                        <input id="loginPassword" type="password" autocomplete="current-password" placeholder="••••••••" required>
+                    </div>
+                    <button class="btn btn-primary w-full" type="submit" id="loginBtn">دخول</button>
+                </form>
+                <form id="setupForm" class="hidden">
+                    <div class="field">
+                        <label for="setupCompany">اسم الشركة</label>
+                        <input id="setupCompany" placeholder="مثال: شركة الأفق" required>
+                    </div>
+                    <div class="field">
+                        <label for="setupName">اسمك الكامل</label>
+                        <input id="setupName" placeholder="مدير النظام" required>
+                    </div>
+                    <div class="field">
+                        <label for="setupUsername">اسم الدخول</label>
+                        <input id="setupUsername" autocomplete="username" placeholder="admin" required>
+                    </div>
+                    <div class="field">
+                        <label for="setupPassword">كلمة المرور</label>
+                        <input id="setupPassword" type="password" autocomplete="new-password" placeholder="8 أحرف على الأقل مع رقم" required>
+                        <div class="help">8 أحرف على الأقل، وتُخزَّن مشفّرة بـ scrypt ولا يمكن استرجاعها.</div>
+                    </div>
+                    <button class="btn btn-primary w-full" type="submit" id="setupBtn">إنشاء الحساب وبدء الاستخدام</button>
+                </form>
+                <div class="auth-foot">Tageep HRMS v3.0 — جميع الحقوق محفوظة</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="shell" class="shell hidden">
+        <aside id="sidebar" class="sidebar">
+            <div class="brand">
+                <div class="brand-mark">T</div>
+                <div class="brand-text">
+                    <strong id="brandCompany">Tageep HRMS</strong>
+                    <small>نظام الموارد البشرية</small>
+                </div>
+            </div>
+            <nav class="nav" id="nav"></nav>
+            <div class="sidebar-foot">
+                <div id="dbBadge">قاعدة البيانات: —</div>
+                <div style="margin-top:3px" id="versionBadge">الإصدار 3.0</div>
+            </div>
+        </aside>
+
+        <div class="main">
+            <div class="topbar-wrap">
+            <header class="topbar">
+                <button class="icon-btn menu-toggle" id="menuToggle" aria-label="القائمة">☰</button>
+                <button class="icon-btn" id="collapseBtn" aria-label="تصغير القائمة" title="تصغير / توسيع القائمة الجانبية">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path d="M15 10l-2 2 2 2"/></svg>
+                </button>
+                <div class="page-head">
+                    <h1 id="pageTitle">لوحة المعلومات</h1>
+                    <span id="pageSubtitle">نظرة عامة على أداء الموارد البشرية</span>
+                </div>
+                <div class="topbar-actions">
+                    <div class="search-box">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                        <input id="globalSearch" placeholder="بحث سريع عن موظف..." autocomplete="off">
+                    </div>
+                    <button class="icon-btn" id="notifBtn" aria-label="الإشعارات">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 10-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
+                        <span id="notifDot" class="dot hidden"></span>
+                    </button>
+                    <button class="icon-btn" id="themeBtn" aria-label="الوضع الليلي">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+                    </button>
+                    <div class="user-chip" id="userChip">
+                        <div class="avatar" id="userAvatar">؟</div>
+                        <div>
+                            <strong id="userNameLabel">—</strong>
+                            <small id="userRoleLabel">—</small>
+                        </div>
+                    </div>
+                </div>
+            </header>
+            <div class="tabs-bar" id="tabsBar"></div>
+            </div>
+            <main id="view" class="view"></main>
+        </div>
+    </div>
+
+    <div id="notifPanel" class="notif-panel hidden">
+        <div class="notif-head">
+            <strong style="flex:1">الإشعارات</strong>
+            <button class="btn btn-sm" id="scanNotifBtn">فحص ذكي</button>
+            <button class="btn btn-sm" id="readAllBtn">قراءة الكل</button>
+        </div>
+        <div class="notif-list" id="notifList"></div>
+    </div>
+
+    <div id="modalRoot"></div>
+    <div id="toastRoot" class="toast-root"></div>
+    <div id="printRoot" style="display:none"></div>
+
+    <script src="/assets/tageephr/hrpro/assets/core.js?v=3.0.6"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-hr.js?v=3.0.6"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-tasks.js?v=3.0.6"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-admin.js?v=3.1.0"></script>
+    <script src="/assets/tageephr/hrpro/assets/boot.js"></script>
+</body>
+</html>
