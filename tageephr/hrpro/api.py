@@ -10,10 +10,10 @@ from datetime import datetime
 import frappe
 from frappe import _
 
-from . import engine, reports, store
-from .defaults import LEVELS, MODULES, ROLE_PRESETS
+from . import engine, files, reports, store
+from .defaults import DEFAULT_SETTINGS, LEVELS, MODULES, ROLE_PRESETS
 from .utils import (
-	date_only, hash_password, is_legacy_plain, month_range, num, round2, sign_token,
+	date_only, hash_password, is_legacy_plain, month_range, num, pad2, round2, sign_token,
 	today_iso, uid, verify_password, verify_token,
 )
 
@@ -198,6 +198,12 @@ def route(method, pattern, auth=True, permission=None):
 
 
 # ═════════ المصادقة ═════════
+@route("GET", r"/license/status", auth=False)
+def license_status(ctx):
+	return {"data": {"active": True, "type": "enterprise", "expiresAt": None}, "active": True,
+	        "message": {"active": True, "type": "enterprise", "expiresAt": None}}
+
+
 @route("GET", r"/auth/setup-status", auth=False)
 def auth_setup_status(ctx):
 	users = ctx.state.get("users") or []
@@ -1239,6 +1245,13 @@ def reports_run(ctx):
 	return {"data": report}
 
 
+def _download(content, filename):
+	frappe.response["filename"] = filename
+	frappe.response["filecontent"] = content
+	frappe.response["type"] = "download"
+	return None
+
+
 @route("POST", r"/reports/export", permission=("reports", "view"))
 def reports_export(ctx):
 	report_id = ctx.body.get("reportId")
@@ -1246,14 +1259,13 @@ def reports_export(ctx):
 		raise ApiError("التقرير غير موجود", 404)
 	report = reports.run_report(ctx.state, report_id, ctx.body.get("filters") or {}, ctx.body.get("columns"))
 	columns = report["columns"]
-	lines = [",".join(['"%s"' % c["label"].replace('"', "''") for c in columns])]
-	for row in report["rows"]:
-		lines.append(",".join(['"%s"' % str(row.get(c["key"]) if row.get(c["key"]) is not None else "").replace('"', "''") for c in columns]))
-	content = "\ufeff" + "\r\n".join(lines)
-	frappe.response["filename"] = "report-%s-%s.csv" % (report_id, time.strftime("%Y%m%d-%H%M%S"))
-	frappe.response["filecontent"] = content.encode("utf-8")
-	frappe.response["type"] = "download"
-	return None
+	fmt = str(ctx.body.get("format") or "csv").lower()
+	stamp = time.strftime("%Y%m%d-%H%M%S")
+	if fmt in ("xlsx", "excel"):
+		content = files.build_xlsx(columns, report["rows"], report.get("title") or "تقرير")
+		return _download(content, "report-%s-%s.xlsx" % (report_id, stamp))
+	content = files.build_csv(columns, report["rows"])
+	return _download(content, "report-%s-%s.csv" % (report_id, stamp))
 
 
 # ═════════ الإشعارات ═════════
@@ -1479,7 +1491,8 @@ def audit_list(ctx):
 # ═════════ الإعدادات وقاعدة البيانات ═════════
 @route("GET", r"/settings", permission=("settings", "view"))
 def settings_get(ctx):
-	return {"data": ctx.state.get("settings")}
+	return {"data": ctx.state.get("settings"), "payrollSettings": ctx.state.get("payrollSettings"),
+	        "leavePolicy": ctx.state.get("leavePolicy"), "db": _db_status_payload(ctx)}
 
 
 @route("PUT", r"/settings", permission=("settings", "edit"))
@@ -1490,9 +1503,17 @@ def settings_save(ctx):
 	s["settings"] = {**(s.get("settings") or {}), **(payload or {})}
 	if isinstance(payload, dict) and isinstance(payload.get("notifications"), dict):
 		s["settings"]["notifications"] = {**((s.get("settings") or {}).get("notifications") or {}), **payload["notifications"]}
+	if isinstance(body.get("payrollSettings"), dict):
+		s["payrollSettings"] = {**(s.get("payrollSettings") or {}), **body["payrollSettings"]}
+	if isinstance(body.get("leavePolicy"), dict):
+		s["leavePolicy"] = {**(s.get("leavePolicy") or {}), **body["leavePolicy"]}
+		if isinstance(body["leavePolicy"].get("lateConversion"), dict):
+			s["leavePolicy"]["lateConversion"] = {**(s["leavePolicy"].get("lateConversion") or {}),
+			                                             **body["leavePolicy"]["lateConversion"]}
 	ctx.audit("update", "settings", "settings", "", "تحديث إعدادات النظام")
 	_commit(ctx)
-	return {"data": s["settings"], "message": "تم حفظ الإعدادات"}
+	return {"data": s["settings"], "payrollSettings": s.get("payrollSettings"),
+	        "leavePolicy": s.get("leavePolicy"), "message": "تم حفظ الإعدادات"}
 
 
 @route("GET", r"/system/network", permission=("settings", "view"))
@@ -1500,29 +1521,229 @@ def system_network(ctx):
 	return {"data": {"host": frappe.local.site, "serverTime": engine._now(), "db": "mariadb"}}
 
 
+def _db_status_payload(ctx):
+	counts = {key: len(ctx.state.get(key) or []) for key in ("employees", "payslips", "attendanceDaily", "auditLog")}
+	try:
+		backups = files.list_backups()
+	except Exception:
+		backups = []
+	return {"type": "frappe", "encryptAtRest": bool((ctx.state.get("settings") or {}).get("encryptAtRest", True)),
+	        "lastSavedAt": engine._now(), "backups": backups, "counts": counts,
+	        "config": {"type": "frappe", "site": frappe.local.site},
+	        "supported": [{"type": "frappe", "name": "قاعدة بيانات الفرابي (MariaDB)",
+	                       "description": "الحفظ يتم كوثائق JSON داخل جدول tabTageephr State في قاعدة الموقع"}]}
+
+
 @route("GET", r"/db/status", permission=("settings", "view"))
 def db_status(ctx):
-	counts = {key: len(ctx.state.get(key) or []) for key in ("employees", "payslips", "attendanceDaily", "auditLog")}
-	return {"data": {"type": "frappe", "encryptAtRest": True, "lastSavedAt": engine._now(),
-	                 "backups": [], "counts": counts, "config": {"type": "frappe"},
-	                 "supported": [{"type": "frappe", "name": "قاعدة بيانات الفرابي (MariaDB)",
-	                                "description": "التخزين يتم داخل الموقع مباشرة"}]}}
+	return {"data": _db_status_payload(ctx)}
 
 
 @route("POST", r"/db/test", permission=("settings", "edit"))
 def db_test(ctx):
-	return {"data": {"ok": True, "message": "التخزين داخل قاعدة بيانات الفرابي جاهز"}, "message": "التخزين داخل قاعدة بيانات الفرابي جاهز"}
+	result = {"ok": True, "type": "frappe", "site": frappe.local.site,
+	          "message": "التخزين داخل قاعدة بيانات الفرابي جاهز"}
+	return {"data": result, "message": result["message"]}
+
+
+@route("POST", r"/db/switch", permission=("settings", "edit"))
+def db_switch(ctx):
+	raise ApiError("التخزين مُدار من قاعدة بيانات الفرابي — لا يمكن التبديل إلى قاعدة خارجية", 400)
+
+
+@route("GET", r"/db/backups", permission=("settings", "view"))
+def db_backups(ctx):
+	return {"data": files.list_backups()}
 
 
 @route("POST", r"/db/backup", permission=("settings", "edit"))
 def db_backup(ctx):
-	payload = json.dumps(ctx.state, ensure_ascii=False)
-	frappe.response["filename"] = "tageephr-backup-%s.json" % time.strftime("%Y%m%d-%H%M%S")
-	frappe.response["filecontent"] = payload.encode("utf-8")
-	frappe.response["type"] = "download"
-	ctx.audit("backup", "settings", "settings", "", "تنزيل نسخة احتياطية")
+	result = files.create_backup(ctx.state, ctx.body.get("passphrase"), ctx.body.get("encrypt") is not False)
+	ctx.audit("backup", "settings", "settings", "", "إنشاء نسخة احتياطية %s" % result["name"])
 	_commit(ctx)
-	return None
+	return {"data": {key: result[key] for key in ("name", "size", "createdAt", "encrypted")},
+	        "message": "تم إنشاء النسخة الاحتياطية"}
+
+
+@route("GET", r"/db/backups/(?P<name>[^/]+)/download", permission=("settings", "view"))
+def db_backup_file(ctx, name):
+	try:
+		content = files.read_backup_file(name)
+	except FileNotFoundError:
+		raise ApiError("النسخة غير موجودة", 404)
+	ctx.audit("download_backup", "settings", "settings", "", "تنزيل النسخة %s" % name)
+	return _download(content, name)
+
+
+@route("POST", r"/db/backup/download", permission=("settings", "view"))
+def db_backup_download(ctx):
+	result = files.create_backup(ctx.state, ctx.body.get("passphrase"), ctx.body.get("encrypt") is not False)
+	ctx.audit("backup", "settings", "settings", "", "تنزيل نسخة احتياطية %s" % result["name"])
+	_commit(ctx)
+	return _download(result["buffer"], result["name"])
+
+
+@route("POST", r"/db/restore", permission=("settings", "delete"))
+def db_restore(ctx):
+	upload = ctx.body.get("__file")
+	if not upload:
+		raise ApiError("لم يتم رفع ملف")
+	passphrase = ctx.body.get("passphrase") or frappe.get_request_header("X-Backup-Password") or ""
+	try:
+		restored = files.restore_from_buffer(upload["content"], passphrase)
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	files.create_backup(ctx.state, auto=True)
+	for key in list(ctx.state.keys()):
+		if key not in restored:
+			ctx.state.pop(key, None)
+	ctx.state.update(restored)
+	settings = ctx.state.get("settings") or {}
+	ctx.state["settings"] = {**DEFAULT_SETTINGS, **settings,
+	                        "notifications": {**DEFAULT_SETTINGS["notifications"], **(settings.get("notifications") or {})}}
+	ctx.audit("restore", "settings", "settings", "", "استعادة نسخة احتياطية")
+	_commit(ctx)
+	return {"ok": True, "message": "تمت استعادة البيانات بنجاح"}
+
+
+@route("POST", r"/db/encryption", permission=("settings", "delete"))
+def db_encryption(ctx):
+	enabled = ctx.body.get("encryptAtRest") is not False
+	ctx.state.setdefault("settings", {})["encryptAtRest"] = enabled
+	ctx.audit("update_encryption", "settings", "settings", "", "تشفير النسخ: %s" % enabled)
+	_commit(ctx)
+	return {"data": {"encryptAtRest": enabled}, "message": "تم تحديث إعداد تشفير النسخ"}
+
+
+# ═════════ استيراد وتصدير الموظفين ═════════
+def _date_cell(row, *keys):
+	value = _cell_raw(row, *keys)
+	if value in (None, ""):
+		return ""
+	parsed = date_only(value)
+	if parsed:
+		return parsed
+	text = str(value)
+	match = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$", text)
+	if match:
+		return "%s-%s-%s" % (match.group(3), pad2(match.group(2)), pad2(match.group(1)))
+	if isinstance(value, (int, float)) or re.match(r"^\d{5}$", text):
+		try:
+			from datetime import timedelta
+
+			base = datetime(1899, 12, 30)
+			return today_iso(base + timedelta(days=float(value)))
+		except Exception:
+			return ""
+	return ""
+
+
+def _cell_raw(row, *keys):
+	for key in keys:
+		if row.get(key) not in (None, ""):
+			return row[key]
+	return ""
+
+
+def _next_number(employees):
+	used = {str(e.get("employeeNumber")) for e in employees}
+	number = 1001
+	while str(number) in used:
+		number += 1
+	return str(number)
+
+
+def _cell(row, *keys):
+	for key in keys:
+		value = row.get(key)
+		if value not in (None, ""):
+			if isinstance(value, float) and value.is_integer():
+				return str(int(value))
+			return str(value).strip() if not isinstance(value, (int, float)) else value
+	return ""
+
+
+@route("POST", r"/import/employees", permission=("employees", "add"))
+def import_employees(ctx):
+	upload = ctx.body.get("__file")
+	if not upload:
+		raise ApiError("لم يتم رفع ملف")
+	try:
+		rows = files.read_table(upload["content"], upload.get("filename") or "")
+	except Exception as exc:
+		raise ApiError("تعذر قراءة الملف: %s" % str(exc)[:120])
+	state = ctx.state
+	employees = state.setdefault("employees", [])
+	branches = state.get("branches") or []
+	departments = state.get("departments") or []
+	year = int(today_iso()[:4])
+	imported = 0
+	errors = []
+	for index, row in enumerate(rows):
+		row = {str(k).strip(): v for k, v in row.items() if k is not None}
+		name = _cell(row, "اسم الموظف", "الاسم", "name")
+		if not name:
+			errors.append("صف %s: الاسم مفقود" % (index + 2))
+			continue
+		number = _cell(row, "رقم الموظف", "الرقم", "employeeNumber")
+		if number and any(str(e.get("employeeNumber")) == str(number) for e in employees):
+			errors.append("صف %s: رقم الموظف %s مكرر" % (index + 2, number))
+			continue
+		national_id = _cell(row, "الهوية", "رقم الهوية", "nationalId")
+		if national_id and any(str(e.get("nationalId")) == str(national_id) for e in employees):
+			errors.append("صف %s: رقم الهوية مكرر" % (index + 2))
+			continue
+		branch_name = _cell(row, "الفرع", "branch")
+		department_name = _cell(row, "القسم", "department")
+		emp = {
+			"id": uid("em_"),
+			"name": name,
+			"employeeNumber": str(number) if number else _next_number(employees),
+			"nationalId": str(national_id),
+			"baseSalary": num(_cell(row, "الراتب الأساسي", "الراتب", "baseSalary")),
+			"branchId": next((b.get("id") for b in branches if b.get("name") == branch_name), ""),
+			"departmentId": next((d.get("id") for d in departments if d.get("name") == department_name), ""),
+			"jobTitle": _cell(row, "المسمى الوظيفي", "الوظيفة", "jobTitle"),
+			"joinDate": _date_cell(row, "تاريخ التعيين", "joinDate") or today_iso(),
+			"phone": _cell(row, "الهاتف", "phone"),
+			"email": _cell(row, "البريد", "البريد الإلكتروني", "email"),
+			"status": "active",
+			"createdAt": engine._now(),
+			"createdBy": ctx.user.get("name"),
+		}
+		employees.append(emp)
+		for leave_type in state.get("leaveTypes") or []:
+			if num(leave_type.get("daysPerYear")) > 0:
+				engine.ensure_balance(state, emp["id"], leave_type["id"], year)
+		imported += 1
+	ctx.audit("import", "employees", "employees", "", "استيراد %s موظف" % imported)
+	_commit(ctx)
+	return {"data": {"imported": imported, "errors": errors}, "message": "تم استيراد %s موظف" % imported}
+
+
+@route("GET", r"/export/employees", permission=("employees", "view"))
+def export_employees(ctx):
+	state = ctx.state
+	branches = {b.get("id"): b.get("name") for b in (state.get("branches") or [])}
+	departments = {d.get("id"): d.get("name") for d in (state.get("departments") or [])}
+	columns = [{"key": "employeeNumber", "label": "رقم الموظف"}, {"key": "name", "label": "اسم الموظف"},
+	           {"key": "nationalId", "label": "الهوية"}, {"key": "branch", "label": "الفرع"},
+	           {"key": "department", "label": "القسم"}, {"key": "jobTitle", "label": "المسمى الوظيفي"},
+	           {"key": "baseSalary", "label": "الراتب الأساسي"}, {"key": "joinDate", "label": "تاريخ التعيين"},
+	           {"key": "phone", "label": "الهاتف"}, {"key": "email", "label": "البريد"},
+	           {"key": "status", "label": "الحالة"}]
+	rows = []
+	for emp in state.get("employees") or []:
+		rows.append({"employeeNumber": emp.get("employeeNumber") or "", "name": emp.get("name") or "",
+		             "nationalId": emp.get("nationalId") or "", "branch": branches.get(emp.get("branchId"), ""),
+		             "department": departments.get(emp.get("departmentId"), ""),
+		             "jobTitle": emp.get("jobTitle") or "", "baseSalary": num(emp.get("baseSalary")),
+		             "joinDate": emp.get("joinDate") or "", "phone": emp.get("phone") or "",
+		             "email": emp.get("email") or "",
+		             "status": "منتهي" if emp.get("status") == "terminated" else "نشط"})
+	content = files.build_xlsx(columns, rows, "الموظفون")
+	ctx.audit("export", "employees", "employees", "", "تصدير %s موظف إلى Excel" % len(rows))
+	return _download(content, "employees-%s.xlsx" % time.strftime("%Y%m%d-%H%M%S"))
 
 
 # ═════════ CRUD عام للمجموعات ═════════
@@ -1543,12 +1764,28 @@ def collection_list(ctx, name):
 	if isinstance(rows, dict):
 		return {"data": rows}
 	rows = list(rows or [])
-	for key in ("employeeId", "branchId", "departmentId", "status", "month", "year"):
-		if ctx.query.get(key):
-			rows = [r for r in rows if str(r.get(key)) == str(ctx.query[key])]
-	if ctx.query.get("q"):
-		q = str(ctx.query["q"])
-		rows = [r for r in rows if q in json.dumps(r, ensure_ascii=False)]
+	if name == "payslips" and ctx.user.get("employeeId") and not has_permission(ctx.user, module, "view"):
+		rows = [r for r in rows if r.get("employeeId") == ctx.user.get("employeeId")]
+	preset = ROLE_PRESETS.get(ctx.user.get("role")) or {}
+	if name == "employees" and preset.get("branchScoped") and ctx.user.get("branchId"):
+		rows = [r for r in rows if r.get("branchId") == ctx.user.get("branchId")]
+	for key, value in ctx.query.items():
+		if key in ("search", "q", "limit", "sort", "order", "path"):
+			continue
+		rows = [r for r in rows if str(r.get(key)) == str(value)]
+	search = ctx.query.get("search") or ctx.query.get("q")
+	if search:
+		needle = str(search).lower()
+		rows = [r for r in rows if needle in json.dumps(r, ensure_ascii=False).lower()]
+	sort_key = ctx.query.get("sort")
+	if sort_key:
+		rows.sort(key=lambda r: (r.get(sort_key) is None, str(r.get(sort_key))),
+		          reverse=str(ctx.query.get("order") or "asc").lower() == "desc")
+	limit = int(num(ctx.query.get("limit")) or 0)
+	if limit > 0:
+		rows = rows[:limit]
+	if name == "users":
+		rows = [sanitize_user(r) for r in rows]
 	return {"data": rows}
 
 
@@ -1617,6 +1854,23 @@ def collection_delete(ctx, name, record_id):
 	rows = ctx.state.get(name)
 	if isinstance(rows, dict):
 		raise ApiError("لا يمكن الحذف من هذه المجموعة")
+	record = next((r for r in rows or [] if r.get("id") == record_id), None)
+	if record:
+		if name == "users":
+			if record_id == ctx.user.get("id"):
+				raise ApiError("لا يمكنك حذف حسابك الحالي")
+			admins = [u for u in (ctx.state.get("users") or []) if u.get("role") == "admin" and not u.get("disabled")]
+			if record.get("role") == "admin" and len(admins) <= 1:
+				raise ApiError("لا يمكن حذف آخر مدير نظام")
+		if name == "workShifts" and any(e.get("shiftId") == record_id for e in (ctx.state.get("employees") or [])):
+			raise ApiError("لا يمكن حذف دوام مرتبط بموظفين")
+		if name == "leaveTypes" and any(l.get("leaveTypeId") == record_id and l.get("status") == "pending"
+		                                for l in (ctx.state.get("leaveRequests") or [])):
+			raise ApiError("لا يمكن حذف نوع إجازة له طلبات معلقة")
+		if name == "branches" and any(e.get("branchId") == record_id for e in (ctx.state.get("employees") or [])):
+			raise ApiError("لا يمكن حذف فرع مرتبط بموظفين")
+		if name == "departments" and any(e.get("departmentId") == record_id for e in (ctx.state.get("employees") or [])):
+			raise ApiError("لا يمكن حذف قسم مرتبط بموظفين")
 	before = len(rows or [])
 	ctx.state[name] = [r for r in rows or [] if r.get("id") != record_id]
 	if len(ctx.state[name]) == before:
@@ -1718,6 +1972,21 @@ def compat_activate(ctx):
 	return {"message": {"active": True}}
 
 
+@route("POST", r"/license/activate", auth=False)
+def license_activate(ctx):
+	return {"data": {"active": True, "licensed": True, "required": False},
+	        "message": "الترخيص مُدار تلقائيًا داخل الفرابي — لا حاجة لمفتاح تنشيط"}
+
+
+@route("POST", r"/method/tageep\.api\.sync_fingerprint", auth=False)
+def compat_sync_fingerprint(ctx):
+	result = fingerprint_punches(ctx)
+	records = ctx.body.get("records") or ctx.body.get("punches") or []
+	return {"message": "ok", "added": result.get("added", 0), "skipped": result.get("skipped", 0),
+	        "unknown": result.get("unknown") or [],
+	        "data": {"added": result.get("added", 0), "total": len(records), "skipped": result.get("skipped", 0)}}
+
+
 # ═════════ المُوزّع ═════════
 @frappe.whitelist(allow_guest=True)
 def dispatch(path=None):
@@ -1731,7 +2000,22 @@ def dispatch(path=None):
 	if path and not path.startswith("/"):
 		path = "/" + path
 	body = {}
-	if request.data:
+	content_type = str(request.headers.get("Content-Type") or "").lower()
+	if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+		try:
+			for key, value in (request.form or {}).items():
+				body[key] = value
+			for key in (request.files or {}):
+				uploaded = request.files[key]
+				body["__file"] = {"filename": uploaded.filename or "", "content": uploaded.read()}
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "TageepHR multipart")
+		try:
+			if request.files:
+				frappe.local.uploaded_file = None
+		except Exception:
+			pass
+	elif request.data:
 		try:
 			raw = request.data.decode("utf-8") if isinstance(request.data, bytes) else request.data
 			body = json.loads(raw)
@@ -1752,21 +2036,21 @@ def dispatch(path=None):
 	ctx = Ctx(method, path, body, query, state)
 
 	try:
-		public = (method, path) in (("GET", "/auth/setup-status"), ("POST", "/auth/setup"), ("POST", "/auth/login"))
-		if not public:
-			_current_user(ctx)
 		for route_method, pattern, handler, needs_auth, permission in ROUTES:
 			if route_method != method:
 				continue
 			match = pattern.match(path)
 			if not match:
 				continue
+			if needs_auth:
+				_current_user(ctx)
 			if permission and not has_permission(ctx.user, permission[0], permission[1]):
 				raise ApiError("لا تملك صلاحية لهذا الإجراء", 403)
 			result = handler(ctx, **match.groupdict())
 			if result is None:
 				return
 			return result
+		_current_user(ctx)
 		raise ApiError("المسار غير موجود", 404)
 	except ApiError as exc:
 		frappe.local.response["http_status_code"] = exc.status

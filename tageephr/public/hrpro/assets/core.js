@@ -187,7 +187,10 @@
         for (const [key, value] of Object.entries(extra)) form.append(key, value);
         const response = await fetch(hrproUrl(path), { method: 'POST', body: form, headers: { 'X-Hrpro-Token': App.token || '', 'X-Frappe-CSRF-Token': window.HRPRO_CSRF || '' } });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.message || 'فشل الرفع');
+        if (!response.ok) {
+            const raw = payload.message && (payload.message.__error || payload.message) || payload.__error;
+            throw new Error(typeof raw === 'string' ? raw : 'فشل الرفع');
+        }
         return payload;
     };
 
@@ -199,7 +202,8 @@
         });
         if (!response.ok) {
             const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.message || 'فشل التصدير');
+            const raw = payload.message && (payload.message.__error || payload.message) || payload.__error;
+            throw new Error(typeof raw === 'string' ? raw : 'فشل التصدير');
         }
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);

@@ -263,3 +263,11 @@ add_to_apps_screen = [
 		"route": "/hrpro",
 	}
 ]
+
+
+scheduler_events = {
+	"daily": [
+		"tageephr.hrpro.tasks.daily_backup",
+		"tageephr.hrpro.tasks.nightly_notifications",
+	],
+}
