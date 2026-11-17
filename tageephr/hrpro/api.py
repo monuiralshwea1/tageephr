@@ -10,7 +10,7 @@ from datetime import datetime
 import frappe
 from frappe import _
 
-from . import engine, files, reports, store
+from . import accounting, engine, files, reports, store
 from .defaults import DEFAULT_SETTINGS, LEVELS, MODULES, ROLE_PRESETS
 from .utils import (
 	date_only, hash_password, is_legacy_plain, month_range, num, pad2, round2, sign_token,
@@ -40,6 +40,7 @@ COLLECTION_MODULE = {
 	"insuranceRecords": "compensation",
 	"reportTemplates": "reports", "notifications": "notifications", "users": "users",
 	"settings": "settings", "auditLog": "audit",
+	"accounts": "accounts", "vouchers": "accounts",
 }
 
 
@@ -1985,6 +1986,346 @@ def compat_sync_fingerprint(ctx):
 	return {"message": "ok", "added": result.get("added", 0), "skipped": result.get("skipped", 0),
 	        "unknown": result.get("unknown") or [],
 	        "data": {"added": result.get("added", 0), "total": len(records), "skipped": result.get("skipped", 0)}}
+
+
+# ═════════ إدارة الحسابات ═════════
+def _accounts_collection(ctx):
+	rows = ctx.state.get("accounts")
+	if not isinstance(rows, list) or not rows:
+		rows = accounting.default_accounts()
+		ctx.state["accounts"] = rows
+	return rows
+
+
+def _vouchers_collection(ctx):
+	rows = ctx.state.get("vouchers")
+	if not isinstance(rows, list):
+		rows = []
+		ctx.state["vouchers"] = rows
+	return rows
+
+
+@route("GET", r"/accounts/summary", permission=("accounts", "view"))
+def accounts_summary(ctx):
+	_accounts_collection(ctx)
+	return {"data": accounting.summary(ctx.state)}
+
+
+@route("GET", r"/accounts/tree", permission=("accounts", "view"))
+def accounts_tree(ctx):
+	_accounts_collection(ctx)
+	return {"data": accounting.tree(ctx.state, ctx.query.get("from") or "", ctx.query.get("to") or "")}
+
+
+@route("GET", r"/accounts/next-code", permission=("accounts", "view"))
+def accounts_next_code(ctx):
+	_accounts_collection(ctx)
+	try:
+		code = accounting.next_code(ctx.state, ctx.query.get("parentId") or "")
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	return {"data": {"code": code}}
+
+
+@route("POST", r"/accounts", permission=("accounts", "add"))
+def accounts_create(ctx):
+	rows = _accounts_collection(ctx)
+	body = ctx.body
+	name = str(body.get("name") or "").strip()
+	if not name:
+		raise ApiError("اسم الحساب مطلوب")
+	parent = next((a for a in rows if a.get("id") == body.get("parentId")), None)
+	if body.get("parentId") and not parent:
+		raise ApiError("الحساب الأب غير موجود")
+	acct_type = (parent or {}).get("type") or body.get("type") or "asset"
+	if acct_type not in accounting.ACCOUNT_TYPES:
+		raise ApiError("نوع الحساب غير صالح")
+	code = str(body.get("code") or "").strip()
+	if not code:
+		try:
+			code = accounting.next_code(ctx.state, parent.get("id") if parent else "")
+		except ValueError as exc:
+			raise ApiError(str(exc))
+	if any(str(a.get("code")) == code for a in rows):
+		raise ApiError("كود الحساب مستخدم بالفعل: %s" % code)
+	is_group = bool(body.get("isGroup"))
+	record = {
+		"id": uid("acc_"), "code": code, "name": name,
+		"nameEn": str(body.get("nameEn") or "").strip(),
+		"type": acct_type, "parentId": (parent or {}).get("id") or "",
+		"isGroup": is_group, "nature": body.get("nature") or ("debit" if acct_type in accounting.DEBIT_TYPES else "credit"),
+		"partyType": body.get("partyType") or "", "description": str(body.get("description") or "").strip(),
+		"active": body.get("active", True) is not False, "createdAt": engine._now(),
+		"createdBy": ctx.user.get("name"),
+	}
+	rows.append(record)
+	ctx.audit("create", "accounts", "accounts", record["id"], "إضافة حساب %s" % name)
+	_commit(ctx)
+	return {"data": record, "message": "تمت إضافة الحساب بنجاح"}
+
+
+def _ensure_no_cycle(state, account, parent_id):
+	current = parent_id
+	guard = 0
+	while current and guard < 30:
+		if current == account.get("id"):
+			raise ApiError("لا يمكن جعل الحساب تابعًا لنفسه أو لأحد فروعه")
+		row = next((a for a in accounting.accounts(state) if a.get("id") == current), None)
+		current = (row or {}).get("parentId") or ""
+		guard += 1
+
+
+@route("PUT", r"/accounts/(?P<account_id>[^/]+)", permission=("accounts", "edit"))
+def accounts_update(ctx, account_id):
+	rows = _accounts_collection(ctx)
+	record = next((a for a in rows if a.get("id") == account_id), None)
+	if not record:
+		raise ApiError("الحساب غير موجود", 404)
+	body = ctx.body
+	if body.get("parentId") is not None:
+		parent_id = body.get("parentId") or ""
+		if parent_id and not any(a.get("id") == parent_id for a in rows):
+			raise ApiError("الحساب الأب غير موجود")
+		_ensure_no_cycle(ctx.state, record, parent_id)
+		record["parentId"] = parent_id
+	if str(body.get("code") or "").strip():
+		code = str(body.get("code")).strip()
+		if any(str(a.get("code")) == code and a.get("id") != account_id for a in rows):
+			raise ApiError("كود الحساب مستخدم بالفعل: %s" % code)
+		record["code"] = code
+	if str(body.get("name") or "").strip():
+		record["name"] = str(body.get("name")).strip()
+	for key in ("nameEn", "description", "partyType"):
+		if key in body:
+			record[key] = str(body.get(key) or "").strip()
+	if "nature" in body and body.get("nature"):
+		record["nature"] = body.get("nature")
+	if "active" in body:
+		record["active"] = body.get("active") is not False
+	if "isGroup" in body:
+		has_moves = any(line.get("accountId") == account_id
+		                for v in ctx.state.get("vouchers") or [] for line in v.get("lines") or [])
+		if record.get("isGroup") and not body.get("isGroup") and has_moves:
+			raise ApiError("لا يمكن تحويل حساب رئيسي عليه حركة إلى حساب فرعي")
+		record["isGroup"] = bool(body.get("isGroup"))
+	record["updatedAt"] = engine._now()
+	ctx.audit("update", "accounts", "accounts", account_id, "تعديل حساب %s" % record.get("name"))
+	_commit(ctx)
+	return {"data": record, "message": "تم حفظ الحساب"}
+
+
+@route("DELETE", r"/accounts/(?P<account_id>[^/]+)", permission=("accounts", "delete"))
+def accounts_delete(ctx, account_id):
+	rows = _accounts_collection(ctx)
+	record = next((a for a in rows if a.get("id") == account_id), None)
+	if not record:
+		raise ApiError("الحساب غير موجود", 404)
+	if any((a.get("parentId") or "") == account_id for a in rows):
+		raise ApiError("لا يمكن حذف حساب له حسابات فرعية — احذف الفروع أولًا")
+	if any(line.get("accountId") == account_id for v in ctx.state.get("vouchers") or [] for line in v.get("lines") or []):
+		raise ApiError("لا يمكن حذف حساب عليه حركة في السندات")
+	ctx.state["accounts"] = [a for a in rows if a.get("id") != account_id]
+	ctx.audit("delete", "accounts", "accounts", account_id, "حذف حساب %s" % record.get("name"))
+	_commit(ctx)
+	return {"ok": True, "message": "تم حذف الحساب"}
+
+
+@route("GET", r"/vouchers", permission=("accounts", "view"))
+def vouchers_list(ctx):
+	rows = _vouchers_collection(ctx)
+	vtype = ctx.query.get("type") or ""
+	status = ctx.query.get("status") or ""
+	date_from = date_only(ctx.query.get("from"))
+	date_to = date_only(ctx.query.get("to"))
+	search = str(ctx.query.get("search") or "").lower()
+	out = []
+	for voucher in rows:
+		day = date_only(voucher.get("date"))
+		if vtype and voucher.get("type") != vtype:
+			continue
+		if status and (voucher.get("status") or "draft") != status:
+			continue
+		if date_from and day < date_from:
+			continue
+		if date_to and day > date_to:
+			continue
+		if search and search not in json.dumps(voucher, ensure_ascii=False).lower():
+			continue
+		out.append(voucher)
+	out.sort(key=lambda v: (date_only(v.get("date")), str(v.get("number"))), reverse=True)
+	limit = int(num(ctx.query.get("limit")) or 500)
+	return {"data": out[:limit], "total": len(out)}
+
+
+@route("GET", r"/vouchers/next-number", permission=("accounts", "view"))
+def vouchers_next_number(ctx):
+	_vouchers_collection(ctx)
+	vtype = ctx.query.get("type") or "journal"
+	if vtype not in accounting.VOUCHER_TYPES:
+		raise ApiError("نوع السند غير صالح")
+	return {"data": {"number": accounting.next_voucher_number(ctx.state, vtype, ctx.query.get("date") or "")}}
+
+
+@route("GET", r"/vouchers/(?P<voucher_id>[^/]+)", permission=("accounts", "view"))
+def vouchers_get(ctx, voucher_id):
+	rows = _vouchers_collection(ctx)
+	record = next((v for v in rows if v.get("id") == voucher_id), None)
+	if not record:
+		raise ApiError("السند غير موجود", 404)
+	return {"data": record}
+
+
+def _prepare_voucher(ctx, payload, existing=None):
+	record = dict(existing or {})
+	record.update({
+		"type": payload.get("type") or record.get("type") or "journal",
+		"date": date_only(payload.get("date")) or record.get("date") or today_iso(),
+		"description": str(payload.get("description") or "").strip(),
+		"reference": str(payload.get("reference") or "").strip(),
+		"branchId": payload.get("branchId") or record.get("branchId") or "",
+		"partyType": payload.get("partyType") or "",
+		"party": str(payload.get("party") or "").strip(),
+		"currency": payload.get("currency") or ((ctx.state.get("settings") or {}).get("currency") or ""),
+		"notes": str(payload.get("notes") or "").strip(),
+		"lines": payload.get("lines") or record.get("lines") or [],
+	})
+	if payload.get("number") is not None:
+		record["number"] = str(payload.get("number") or "").strip()
+	record["isOpening"] = record.get("type") == "opening"
+	return record
+
+
+@route("POST", r"/vouchers", permission=("accounts", "add"))
+def vouchers_create(ctx):
+	_vouchers_collection(ctx)
+	record = _prepare_voucher(ctx, ctx.body)
+	record["id"] = uid("vc_")
+	record["status"] = "posted" if ctx.body.get("post") else "draft"
+	record["createdAt"] = engine._now()
+	record["createdBy"] = ctx.user.get("name")
+	try:
+		accounting.validate_voucher(ctx.state, record, None, require_balance=record["status"] == "posted")
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	if record["status"] == "posted":
+		record["postedAt"] = engine._now()
+	ctx.state["vouchers"].append(record)
+	ctx.audit("create", "accounts", "vouchers", record["id"], "إنشاء %s %s" % (record["type"], record["number"]))
+	_commit(ctx)
+	return {"data": record, "message": "تم حفظ السند"}
+
+
+@route("PUT", r"/vouchers/(?P<voucher_id>[^/]+)", permission=("accounts", "edit"))
+def vouchers_update(ctx, voucher_id):
+	rows = _vouchers_collection(ctx)
+	record = next((v for v in rows if v.get("id") == voucher_id), None)
+	if not record:
+		raise ApiError("السند غير موجود", 404)
+	if record.get("status") == "cancelled":
+		raise ApiError("السند ملغي — لا يمكن تعديله")
+	updated = _prepare_voucher(ctx, ctx.body, record)
+	try:
+		accounting.validate_voucher(ctx.state, updated, voucher_id, require_balance=updated.get("status") == "posted"
+		                            or bool(ctx.body.get("post")))
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	if ctx.body.get("post"):
+		updated["status"] = "posted"
+		updated["postedAt"] = engine._now()
+	updated["updatedAt"] = engine._now()
+	record.clear()
+	record.update(updated)
+	ctx.audit("update", "accounts", "vouchers", voucher_id, "تعديل السند %s" % record.get("number"))
+	_commit(ctx)
+	return {"data": record, "message": "تم حفظ السند"}
+
+
+@route("POST", r"/vouchers/(?P<voucher_id>[^/]+)/post", permission=("accounts", "edit"))
+def vouchers_post(ctx, voucher_id):
+	rows = _vouchers_collection(ctx)
+	record = next((v for v in rows if v.get("id") == voucher_id), None)
+	if not record:
+		raise ApiError("السند غير موجود", 404)
+	if record.get("status") == "cancelled":
+		raise ApiError("السند ملغي — لا يمكن ترحيله")
+	try:
+		accounting.post_voucher(ctx.state, record)
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	ctx.audit("post", "accounts", "vouchers", voucher_id, "ترحيل السند %s" % record.get("number"))
+	_commit(ctx)
+	return {"data": record, "message": "تم ترحيل السند"}
+
+
+@route("POST", r"/vouchers/(?P<voucher_id>[^/]+)/cancel", permission=("accounts", "edit"))
+def vouchers_cancel(ctx, voucher_id):
+	rows = _vouchers_collection(ctx)
+	record = next((v for v in rows if v.get("id") == voucher_id), None)
+	if not record:
+		raise ApiError("السند غير موجود", 404)
+	record["status"] = "cancelled"
+	record["cancelledAt"] = engine._now()
+	ctx.audit("cancel", "accounts", "vouchers", voucher_id, "إلغاء السند %s" % record.get("number"))
+	_commit(ctx)
+	return {"data": record, "message": "تم إلغاء السند"}
+
+
+@route("DELETE", r"/vouchers/(?P<voucher_id>[^/]+)", permission=("accounts", "delete"))
+def vouchers_delete(ctx, voucher_id):
+	rows = _vouchers_collection(ctx)
+	record = next((v for v in rows if v.get("id") == voucher_id), None)
+	if not record:
+		raise ApiError("السند غير موجود", 404)
+	if (record.get("status") or "draft") == "posted":
+		raise ApiError("لا يمكن حذف سند مُرحّل — ألغِه أولًا")
+	ctx.state["vouchers"] = [v for v in rows if v.get("id") != voucher_id]
+	ctx.audit("delete", "accounts", "vouchers", voucher_id, "حذف السند %s" % record.get("number"))
+	_commit(ctx)
+	return {"ok": True, "message": "تم حذف السند"}
+
+
+@route("GET", r"/accounts/statement", permission=("accounts", "view"))
+def accounts_statement(ctx):
+	_accounts_collection(ctx)
+	account_id = ctx.query.get("accountId") or ""
+	if not account_id:
+		raise ApiError("اختر الحساب أولًا")
+	try:
+		data = accounting.statement(ctx.state, account_id, ctx.query.get("from") or "", ctx.query.get("to") or "")
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	return {"data": data}
+
+
+@route("GET", r"/accounting/reports/catalog", permission=("accounts", "view"))
+def accounting_reports_catalog(ctx):
+	return {"data": accounting.report_catalog()}
+
+
+@route("POST", r"/accounting/reports/run", permission=("accounts", "view"))
+def accounting_reports_run(ctx):
+	_accounts_collection(ctx)
+	report_id = ctx.body.get("reportId") or "trial_balance"
+	try:
+		result = accounting.run_report(ctx.state, report_id, ctx.body.get("filters") or {})
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	return {"data": result}
+
+
+@route("POST", r"/accounting/reports/export", permission=("accounts", "view"))
+def accounting_reports_export(ctx):
+	_accounts_collection(ctx)
+	report_id = ctx.body.get("reportId") or "trial_balance"
+	try:
+		result = accounting.run_report(ctx.state, report_id, ctx.body.get("filters") or {})
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	columns = [{"key": c["key"], "label": c["label"]} for c in result["columns"]]
+	stamp = time.strftime("%Y%m%d-%H%M%S")
+	if str(ctx.body.get("format") or "xlsx") in ("xlsx", "excel"):
+		return _download(files.build_xlsx(columns, result["rows"], result["title"]), "%s-%s.xlsx" % (report_id, stamp))
+	return _download(files.build_csv(columns, result["rows"]), "%s-%s.csv" % (report_id, stamp))
 
 
 # ═════════ المُوزّع ═════════

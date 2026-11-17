@@ -19,6 +19,7 @@ COLLECTIONS = [
 	"employeeDocuments", "payrollSettings", "leavePolicy", "documentTypes",
 	"eosSettlements", "approvalRequests",
 	"tasks", "taskComments", "selfRequests",
+	"accounts", "vouchers",
 ]
 
 MODULES = {
@@ -36,6 +37,7 @@ MODULES = {
 	"settings": "الإعدادات",
 	"audit": "سجل التدقيق",
 	"self": "الخدمة الذاتية",
+	"accounts": "إدارة الحسابات",
 }
 
 ROLE_PRESETS = {
@@ -43,7 +45,8 @@ ROLE_PRESETS = {
 	"hr_manager": {"label": "مدير الموارد البشرية", "branchScoped": False, "modules": {
 		"dashboard": "all", "employees": "all", "organization": "all", "attendance": "all",
 		"leaves": "all", "tasks": "all", "payroll": "all", "compensation": "all",
-		"reports": "all", "notifications": "all", "audit": "view", "self": "all"}},
+		"reports": "all", "notifications": "all", "audit": "view", "self": "all",
+		"accounts": "view"}},
 	"hr_officer": {"label": "أخصائي موارد بشرية", "branchScoped": True, "modules": {
 		"dashboard": "view", "employees": "all", "organization": "view", "attendance": "all",
 		"leaves": "all", "tasks": "all", "payroll": "view", "compensation": "all",
@@ -53,11 +56,11 @@ ROLE_PRESETS = {
 		"leaves": "edit", "tasks": "all", "reports": "view", "notifications": "all", "self": "all"}},
 	"accountant": {"label": "محاسب", "branchScoped": False, "modules": {
 		"dashboard": "view", "tasks": "view", "payroll": "all", "compensation": "all",
-		"reports": "view", "notifications": "all", "self": "all"}},
+		"reports": "view", "notifications": "all", "self": "all", "accounts": "all"}},
 	"auditor": {"label": "مراجع", "branchScoped": False, "modules": {
 		"dashboard": "view", "employees": "view", "attendance": "view", "leaves": "view",
 		"tasks": "view", "payroll": "view", "compensation": "view", "reports": "view",
-		"audit": "view", "notifications": "view", "self": "view"}},
+		"audit": "view", "notifications": "view", "self": "view", "accounts": "view"}},
 	"employee": {"label": "موظف (خدمة ذاتية)", "branchScoped": True, "selfOnly": True,
 	             "modules": {"self": "all", "notifications": "view"}},
 }
@@ -152,4 +155,8 @@ def defaults_clone() -> dict:
 	state["documentTypes"] = json.loads(json.dumps(DEFAULT_DOCUMENT_TYPES))
 	state["branches"] = [branch]
 	state["users"] = []
+	from .accounting import default_accounts
+
+	state["accounts"] = default_accounts()
+	state["vouchers"] = []
 	return state
