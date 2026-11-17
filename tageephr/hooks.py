@@ -248,7 +248,6 @@ app_license = "mit"
 # ignore_translatable_strings_from = []
 
 # ─── Tageep HRMS (تطبيق الموارد البشرية المستقل) ───
-app_include_css = None
 website_route_rules = [
 	{"from_route": "/hrpro", "to_route": "hrpro"},
 	{"from_route": "/hrpro/<path:app_path>", "to_route": "hrpro"},
