@@ -1241,6 +1241,9 @@
 
             const renderGeneral = () => {
                 const s = A.state.data.settings || {};
+                const LEGACY_SIDEBARS = ['#0b1526', '#3f51b5', '#283593'];
+                const SIDEBAR_DEFAULT = '#0070CC';
+                const sidebarColor = (s.sidebarColor && !LEGACY_SIDEBARS.includes(String(s.sidebarColor).toLowerCase())) ? s.sidebarColor : SIDEBAR_DEFAULT;
                 const weeks = [{ v: '0', l: 'الأحد' }, { v: '1', l: 'الاثنين' }, { v: '2', l: 'الثلاثاء' }, { v: '3', l: 'الأربعاء' }, { v: '4', l: 'الخميس' }, { v: '5', l: 'الجمعة' }, { v: '6', l: 'السبت' }];
                 const weeklyOff = Array.isArray(s.weeklyOffDays) ? s.weeklyOffDays : ['5'];
                 pane.innerHTML = `<form id="generalForm" class="form-grid">
@@ -1266,8 +1269,18 @@
                     <div class="field"><label>أيام الخصم لكل غياب</label><input type="number" step="0.5" id="s_absentDeductionDays" value="${s.absentDeductionDays || 1}"></div>
                     <div class="field"><label>بداية تتبع الحضور (لا يُحتسب قبلها غياب)</label><input type="date" id="s_attendanceStartDate" value="${h(s.attendanceStartDate || '')}"></div>
                     <div class="field"><label>حد الغياب العام (دقيقة تأخير)</label><input type="number" min="0" id="s_lateAbsenceMinutes" value="${s.lateAbsenceMinutes || 0}"><div class="help">0 = معطّل. عند تجاوز هذا الحد يُحتسب اليوم غيابًا حتى لو بصم الموظف.</div></div>
+                    <div class="form-section full"><h4>${A.icon('menu')} المظهر والقائمة الجانبية</h4></div>
                     <div class="field"><label>لون النظام الأساسي</label><input type="color" id="s_themeColor" value="${h(s.themeColor || '#0d9488')}" style="height:40px;padding:3px"></div>
-                    <div class="field"><label>لون القائمة الجانبية</label><input type="color" id="s_sidebarColor" value="${h((s.sidebarColor && String(s.sidebarColor).toLowerCase() !== '#0b1526') ? s.sidebarColor : '#3F51B5')}" style="height:40px;padding:3px"></div>
+                    <div class="field"><label>لون القائمة الجانبية الافتراضي</label><input type="color" id="s_sidebarColor" value="${h(sidebarColor)}" style="height:40px;padding:3px">
+                        <div class="help">الافتراضي ${SIDEBAR_DEFAULT} — يُطبَّق على شريط القائمة الجانبية وإطار العنصر النشط وألوان البطاقات المشتقة منه.</div>
+                        <button type="button" class="btn" id="sidebarColorReset" style="margin-top:8px">${A.icon('refresh')} استعادة اللون الافتراضي</button>
+                    </div>
+                    <div class="field full"><label>معاينة مباشرة</label>
+                        <div id="sidebarColorPreview" style="display:flex;align-items:center;gap:9px;min-height:46px;padding:10px 14px;border:2px solid var(--tg-sb-card-border);border-inline-end:4px solid var(--tg-sb-accent);border-radius:13px;background:var(--tg-sb-card-bg);color:var(--tg-sb-text);font-weight:600;max-width:320px">
+                            <span style="width:14px;height:14px;border-radius:4px;background:var(--tg-sb-accent);flex:none"></span> القائمة الجانبية
+                        </div>
+                        <div class="help">تتغيّر المعاينة والقائمة الفعلية فور اختيار اللون، وتُحفظ مع الإعدادات.</div>
+                    </div>
                     <div class="field full"><label>أيام العطلة الأسبوعية</label><div class="checks">${weeks.map(w => `<label><input type="checkbox" name="weeklyOff" value="${w.v}" ${weeklyOff.includes(w.v) ? 'checked' : ''}> ${w.l}</label>`).join('')}</div></div>
                     <div class="form-section full"><h4>${A.icon('shield')} التأمينات والضرائب</h4></div>
                     <div class="field"><label>نسبة التأمينات — الموظف %</label><input type="number" step="0.01" id="s_gosiEmployeeRate" value="${s.gosiEmployeeRate || 0}"></div>
@@ -1282,6 +1295,10 @@
                 const generalForm = document.getElementById('generalForm');
                 A.bindImageField(generalForm, 'logo', { maxWidth: 480 });
                 A.bindImageField(generalForm, 'printHeaderImage', { maxWidth: 1600 });
+                const sidebarColorInput = document.getElementById('s_sidebarColor');
+                const previewSidebar = () => A.applyTheme({ ...(A.state.data.settings || {}), sidebarColor: sidebarColorInput.value || SIDEBAR_DEFAULT });
+                sidebarColorInput.addEventListener('input', previewSidebar);
+                document.getElementById('sidebarColorReset').onclick = () => { sidebarColorInput.value = SIDEBAR_DEFAULT; previewSidebar(); };
                 document.getElementById('printPreviewBtn').onclick = () => A.print({
                     title: 'معاينة الطباعة', subtitle: 'نموذج تجريبي',
                     html: `<table class="data"><thead><tr><th>البيان</th><th>المبلغ</th></tr></thead><tbody><tr><td>الراتب الأساسي</td><td class="num">${A.money(150000)}</td></tr><tr><td>البدلات</td><td class="num">${A.money(25000)}</td></tr><tr><td>صافي المستحق</td><td class="num">${A.money(175000)}</td></tr></tbody></table>`

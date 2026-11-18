@@ -763,25 +763,41 @@
             const brandRgb = hexToRgb(s.themeColor);
             if (brandRgb) root.style.setProperty('--brand-dark', mixColor(brandRgb, 0, 0.18));
         }
-        const SIDEBAR_DEFAULT = '#3F51B5';
+        // القائمة الجانبية أصبحت بخلفية بيضاء وبطاقات فاتحة (تصميم ثابت)،
+        // واللون المحفوظ في الإعدادات يُستخدم للشريط الأزرق وإطار العنصر النشط فقط.
+        const SIDEBAR_DEFAULT = '#0070CC';
+        const LEGACY_SIDEBARS = ['#0b1526', '#3f51b5', '#283593'];
         const savedSidebar = String(s.sidebarColor || '').trim();
-        // اللون القديم (#0b1526) كان الافتراضي؛ يُستبدل بالافتراضي الجديد تلقائيًا
-        const sidebar = (!savedSidebar || savedSidebar.toLowerCase() === '#0b1526') ? SIDEBAR_DEFAULT : savedSidebar;
-        root.style.setProperty('--sidebar-bg', sidebar);
-        const rgb = hexToRgb(sidebar) || { r: 11, g: 21, b: 38 };
-        // قائمة فاتحة نحتاج نصًا غامقًا، وقائمة غامقة نحتاج نصًا فاتحًا
-        const lightSidebar = relativeLuminance(rgb) > 0.42;
-        const ink = lightSidebar ? '11, 21, 38' : '241, 245, 249';
-        root.style.setProperty('--sidebar-fg', `rgb(${ink})`);
-        root.style.setProperty('--sidebar-fg-strong', lightSidebar ? '#0b1526' : '#ffffff');
-        root.style.setProperty('--sidebar-fg-soft', `rgba(${ink}, .84)`);
-        root.style.setProperty('--sidebar-fg-dim', `rgba(${ink}, .58)`);
-        root.style.setProperty('--sidebar-line', lightSidebar ? 'rgba(11, 21, 38, .14)' : 'rgba(255, 255, 255, .09)');
-        root.style.setProperty('--sidebar-hover', lightSidebar ? 'rgba(11, 21, 38, .07)' : 'rgba(255, 255, 255, .08)');
-        // لون القائمة موحّد (بدون تدرّج) كما هو مطلوب
-        root.style.setProperty('--sidebar-bg-2', sidebar);
-        root.style.setProperty('--sidebar-bg-3', sidebar);
-        root.style.setProperty('--sidebar-accent', mixColor(rgb, 0, lightSidebar ? 0.35 : 0.28));
+        const sidebar = (!savedSidebar || LEGACY_SIDEBARS.includes(savedSidebar.toLowerCase()))
+            ? SIDEBAR_DEFAULT : savedSidebar;
+        const sidebarRgb = hexToRgb(sidebar) ? hexToRgb(sidebar) : hexToRgb(SIDEBAR_DEFAULT);
+        root.style.setProperty('--tg-sb-accent', sidebarRgb ? sidebar : SIDEBAR_DEFAULT);
+        root.style.setProperty('--sidebar-accent', sidebarRgb ? sidebar : SIDEBAR_DEFAULT);
+        // تُشتق بقية ألوان القائمة من اللون المختار حتى تتغيّر كلها معه
+        if (sidebarRgb) {
+            const tint = weight => mixColor(sidebarRgb, 255, weight);
+            const shade = weight => mixColor(sidebarRgb, 0, weight);
+            root.style.setProperty('--tg-sb-card-border', tint(.8));
+            root.style.setProperty('--tg-sb-card-border-hover', tint(.45));
+            root.style.setProperty('--tg-sb-active-bg', tint(.8));
+            root.style.setProperty('--tg-sb-hover-bg', tint(.94));
+            root.style.setProperty('--tg-sb-text-strong', shade(.28));
+            root.style.setProperty('--tg-sb-icon', sidebarRgb ? sidebar : SIDEBAR_DEFAULT);
+            root.style.setProperty('--tg-sb-shadow', `0 1px 2px rgba(${sidebarRgb.r}, ${sidebarRgb.g}, ${sidebarRgb.b}, .06)`);
+            root.style.setProperty('--sidebar-fg-strong', shade(.28));
+            root.style.setProperty('--sidebar-line', `rgba(${sidebarRgb.r}, ${sidebarRgb.g}, ${sidebarRgb.b}, .18)`);
+            root.style.setProperty('--sidebar-hover', tint(.94));
+        }
+        // خلفية بيضاء ونص غامق دائمًا (حتى لا يقلب اللون القديم النص إلى الأبيض)
+        root.style.setProperty('--sidebar-bg', '#ffffff');
+        root.style.setProperty('--sidebar-bg-2', '#ffffff');
+        root.style.setProperty('--sidebar-bg-3', '#ffffff');
+        root.style.setProperty('--sidebar-fg', '#5F5F5F');
+        root.style.setProperty('--sidebar-fg-strong', '#0B4F8C');
+        root.style.setProperty('--sidebar-fg-soft', '#5F5F5F');
+        root.style.setProperty('--sidebar-fg-dim', '#7C8A99');
+        root.style.setProperty('--sidebar-line', 'rgba(0, 112, 204, .18)');
+        root.style.setProperty('--sidebar-hover', '#EEF7FF');
     };
 
     App.navigate = hash => {
@@ -914,6 +930,8 @@
     };
 
     // ───────────── الطباعة والتصدير ─────────────
+    // رأس الطباعة يتكرر في كل صفحة: العنصر مثبّت (position:fixed) أعلى كل صفحة،
+    // ويُحجز ارتفاعه في كل صفحة عبر صف فارغ داخل <thead> لجدول يحيط بالمحتوى.
     App.print = ({ title, subtitle = '', html, landscape = false }) => {
         const settings = App.state.data.settings || {};
         const paper = settings.printerPaperSize || 'A4';
@@ -938,20 +956,26 @@
                     <div class="ph-brand">${logoHtml}<div><h1>${escapeHtml(company)}</h1>${settings.companyNameEn ? `<div class="ph-en">${escapeHtml(settings.companyNameEn)}</div>` : ''}</div></div>
                     <div class="ph-meta">${meta.map(escapeHtml).join('<br>')}</div>
                 </div>`;
+        const titleHtml = `<div class="print-title"><h2>${escapeHtml(title)}${subtitle ? `<span style="font-size:${Math.max(9, fontSize)}px;font-weight:400;color:#334155"> — ${escapeHtml(subtitle)}</span>` : ''}</h2><div class="ph-meta">${escapeHtml(App.date(App.today()))}</div></div>`;
         const doc = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
-            <link rel="stylesheet" href="/assets/app.css?v=3.0.5">
             <style>
                 *{box-sizing:border-box}
-                body{background:#fff;color:#0f172a;margin:0;padding:8px 4px;font-family:${fontFamily};font-size:${fontSize}px;line-height:1.6;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-                .print-banner{display:block;width:100%;height:auto;margin:0 0 10px}
-                .print-head{display:flex;justify-content:space-between;gap:16px;align-items:center;border-bottom:2px solid #0d9488;padding-bottom:10px;margin-bottom:10px}
+                html,body{background:#fff;color:#0f172a;margin:0;padding:0;font-family:${fontFamily};font-size:${fontSize}px;line-height:1.6;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+                /* الرأس المتكرر: مثبّت أعلى كل صفحة */
+                .print-running{position:fixed;top:0;left:0;right:0;background:#fff;padding:0 0 4px;z-index:20}
+                /* جدول الغلاف: صف <thead> فارغ يحجز ارتفاع الرأس في كل صفحة */
+                .print-shell{width:100%;border-collapse:collapse;table-layout:fixed}
+                .print-shell>thead>tr>th,.print-shell>thead>tr>td{padding:0 !important;border:0 !important;background:transparent !important;height:0}
+                .print-shell>tbody>tr>td{padding:0 !important;border:0 !important;background:transparent !important;vertical-align:top}
+                .print-banner{display:block;width:100%;height:auto;margin:0 0 8px}
+                .print-head{display:flex;justify-content:space-between;gap:16px;align-items:center;border-bottom:2px solid #0d9488;padding-bottom:10px;margin-bottom:8px}
                 .ph-brand{display:flex;gap:10px;align-items:center}
                 .ph-logo{height:${Math.round(fontSize * 4.2)}px;max-width:190px;object-fit:contain}
                 .ph-mark{width:${Math.round(fontSize * 3.6)}px;height:${Math.round(fontSize * 3.6)}px;border-radius:10px;background:#0d9488;color:#fff;display:grid;place-items:center;font-weight:800;font-size:${Math.round(fontSize * 1.5)}px}
                 .print-head h1{font-size:${fontSize + 7}px;margin:0;color:#0f766e}
                 .ph-en{font-size:${Math.max(9, fontSize - 2)}px;color:#475569;direction:ltr;text-align:right}
                 .ph-meta{font-size:${Math.max(8, fontSize - 2)}px;color:#334155;line-height:1.7;text-align:left}
-                .print-title{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;border-bottom:1px solid #64748b;padding-bottom:6px;margin-bottom:12px}
+                .print-title{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;border-bottom:1px solid #64748b;padding-bottom:6px;margin-bottom:12px;page-break-after:avoid}
                 .print-title h2{font-size:${fontSize + 4}px;margin:0;flex:1}
                 .print-title .ph-meta{white-space:nowrap}
                 .print-sign{display:flex;justify-content:space-between;margin-top:34px;font-size:${Math.max(8, fontSize - 1)}px;color:#334155}
@@ -967,21 +991,46 @@
                 .print-area{display:block !important}
                 @page{size:${paper} ${landscape ? 'landscape' : 'portrait'};margin:8mm}
             </style></head><body>
-            ${headerHtml}
-            <div class="print-title"><h2>${escapeHtml(title)}${subtitle ? `<span style="font-size:${Math.max(9, fontSize)}px;font-weight:400;color:#334155"> — ${escapeHtml(subtitle)}</span>` : ''}</h2><div class="ph-meta">${escapeHtml(App.date(App.today()))}</div></div>
+            <div class="print-running" id="printRunning">${headerHtml}</div>
+            <table class="print-shell"><thead><tr><th class="print-spacer" id="printSpacer"></th></tr></thead>
+            <tbody><tr><td class="print-main">
+            ${titleHtml}
             ${html}
             <div class="print-sign"><span>توقيع الموارد البشرية: ____________________</span><span>توقيع الإدارة: ____________________</span></div>
             <div class="print-foot">${escapeHtml(settings.payslipFooterNote || '')}${settings.payslipFooterNote ? ' — ' : ''}تم إنشاء هذا المستند آليًا بواسطة Tageep HRMS</div>
+            </td></tr></tbody></table>
             </body></html>`;
         const frame = document.createElement('iframe');
         frame.style.cssText = 'position:fixed;left:-9999px;width:0;height:0;border:0';
         document.body.appendChild(frame);
         const docFrame = frame.contentWindow.document;
         docFrame.open(); docFrame.write(doc); docFrame.close();
-        setTimeout(() => {
+        let printed = false;
+        const firePrint = () => {
+            if (printed) return;
+            printed = true;
+            // احجز مساحة الرأس في كل صفحة بمطابقة ارتفاعه الفعلي
+            try {
+                const running = docFrame.getElementById('printRunning');
+                const spacer = docFrame.getElementById('printSpacer');
+                if (running && spacer) {
+                    const h = Math.ceil(running.getBoundingClientRect().height) + 4;
+                    spacer.style.height = h + 'px';
+                }
+            } catch (_) {}
             try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch (_) {}
-            setTimeout(() => frame.remove(), 1500);
-        }, 350);
+            setTimeout(() => frame.remove(), 2000);
+        };
+        const waitForImages = () => {
+            let pending = [];
+            try { pending = Array.from(docFrame.images).filter(img => !img.complete); } catch (_) {}
+            if (!pending.length) return setTimeout(firePrint, 60);
+            let left = pending.length;
+            const step = () => { if (--left <= 0) setTimeout(firePrint, 60); };
+            pending.forEach(img => { img.addEventListener('load', step); img.addEventListener('error', step); });
+            setTimeout(firePrint, 1800);
+        };
+        setTimeout(waitForImages, 120);
     };
 
     App.printTable = ({ title, subtitle, columns, rows, landscape }) => {

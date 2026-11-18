@@ -1,0 +1,102 @@
+/* ─────────────────────────────────────────────────────────────
+   Tageep HRMS — المظهر الافتراضي للقائمة الجانبية في المكتب (Desk)
+   بطاقات بيضاء بإطار أزرق دائر الزوايا، وخلفية فاتحة للوحة،
+   والعنصر النشط بخلفية زرقاء فاتحة.
+   ───────────────────────────────────────────────────────────── */
+:root {
+    --tg-sb-panel-bg: #e9f2fb;
+    --tg-sb-panel-border: #b7d1ec;
+    --tg-sb-item-bg: #ffffff;
+    --tg-sb-item-border: #8db8e3;
+    --tg-sb-item-border-hover: #2f76c8;
+    --tg-sb-item-text: #12253d;
+    --tg-sb-item-icon: #2f76c8;
+    --tg-sb-active-bg: #d6e9ff;
+    --tg-sb-active-text: #12457f;
+    --tg-sb-radius: 10px;
+}
+
+/* خلفية اللوحة الجانبية */
+.layout-side-section .desk-sidebar,
+.layout-side-section .overlay-sidebar-container,
+.layout-side-section .list-sidebar,
+.layout-side-section .standard-sidebar {
+    background: var(--tg-sb-panel-bg) !important;
+    border: 1px solid var(--tg-sb-panel-border) !important;
+    border-radius: 12px !important;
+    padding: 8px 10px !important;
+}
+
+/* كل مديول/رابط كبطاقة مستقلة بإطار */
+.layout-side-section .standard-sidebar-item,
+.desk-sidebar .standard-sidebar-item {
+    background: var(--tg-sb-item-bg) !important;
+    border: 1px solid var(--tg-sb-item-border) !important;
+    border-radius: var(--tg-sb-radius) !important;
+    margin: 0 0 6px 0 !important;
+    padding: 9px 12px !important;
+    box-shadow: 0 1px 2px rgba(18, 71, 128, 0.08) !important;
+    transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease;
+    overflow: hidden;
+}
+
+.layout-side-section .standard-sidebar-item > a,
+.desk-sidebar .standard-sidebar-item > a {
+    color: var(--tg-sb-item-text) !important;
+    font-weight: 600;
+    width: 100%;
+}
+
+.layout-side-section .standard-sidebar-item svg,
+.desk-sidebar .standard-sidebar-item svg,
+.layout-side-section .standard-sidebar-item .sidebar-item-icon,
+.desk-sidebar .standard-sidebar-item .sidebar-item-icon {
+    color: var(--tg-sb-item-icon) !important;
+}
+
+/* الحالة عند المرور */
+.layout-side-section .standard-sidebar-item:hover,
+.layout-side-section .standard-sidebar-item:focus-within,
+.desk-sidebar .standard-sidebar-item:hover,
+.desk-sidebar .standard-sidebar-item:focus-within {
+    background: #f4f9ff !important;
+    border-color: var(--tg-sb-item-border-hover) !important;
+    box-shadow: 0 2px 6px rgba(18, 71, 128, 0.14) !important;
+}
+
+/* العنصر النشط */
+.layout-side-section .standard-sidebar-item.selected,
+.layout-side-section .standard-sidebar-item.selected:hover,
+.desk-sidebar .standard-sidebar-item.selected,
+.desk-sidebar .standard-sidebar-item.selected:hover {
+    background: var(--tg-sb-active-bg) !important;
+    border-color: var(--tg-sb-item-border-hover) !important;
+    box-shadow: inset 0 0 0 1px rgba(47, 118, 200, 0.28) !important;
+}
+
+.layout-side-section .standard-sidebar-item.selected > a,
+.layout-side-section .standard-sidebar-item.selected .sidebar-item-label,
+.desk-sidebar .standard-sidebar-item.selected > a,
+.desk-sidebar .standard-sidebar-item.selected .sidebar-item-label {
+    color: var(--tg-sb-active-text) !important;
+    font-weight: 700;
+}
+
+/* عنوان المجموعة */
+.layout-side-section .standard-sidebar-label,
+.desk-sidebar .standard-sidebar-label {
+    color: #3d5d80 !important;
+    font-weight: 700 !important;
+    font-size: 11px !important;
+    letter-spacing: .2px;
+    margin-bottom: 6px !important;
+}
+
+/* الروابط الفرعية داخل المديول المفتوح */
+.layout-side-section .sidebar-child-item .standard-sidebar-item {
+    background: #f7fbff !important;
+    border-color: #c3d9ef !important;
+    border-radius: 8px !important;
+    padding: 7px 12px !important;
+    box-shadow: none !important;
+}

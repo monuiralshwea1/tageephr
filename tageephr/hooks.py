@@ -248,6 +248,9 @@ app_license = "mit"
 # ignore_translatable_strings_from = []
 
 # ─── Tageep HRMS (تطبيق الموارد البشرية المستقل) ───
+# المظهر الافتراضي للقائمة الجانبية (بطاقات بيضاء بإطار أزرق)
+app_include_css = "/assets/tageephr/css/desk_sidebar.css"
+
 website_route_rules = [
 	{"from_route": "/hrpro", "to_route": "hrpro"},
 	{"from_route": "/hrpro/<path:app_path>", "to_route": "hrpro"},

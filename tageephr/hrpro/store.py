@@ -113,6 +113,10 @@ def load_state() -> dict:
 	# دمج الإعدادات الجديدة مع المحفوظة
 	state["settings"] = {**DEFAULT_SETTINGS, **(state.get("settings") or {})}
 	state["settings"]["notifications"] = {**DEFAULT_SETTINGS["notifications"], **((state["settings"].get("notifications") or {}))}
+	# ترحيل ألوان القائمة الجانبية القديمة إلى اللون الافتراضي الجديد
+	_legacy_sidebars = {"#0b1526", "#3f51b5", "#283593"}
+	if str(state["settings"].get("sidebarColor") or "").strip().lower() in _legacy_sidebars:
+		state["settings"]["sidebarColor"] = DEFAULT_SETTINGS["sidebarColor"]
 	state["payrollSettings"] = {**DEFAULT_PAYROLL_SETTINGS, **(state.get("payrollSettings") or {})}
 	state["leavePolicy"] = {**DEFAULT_LEAVE_POLICY, **(state.get("leavePolicy") or {})}
 	state["leavePolicy"]["lateConversion"] = {**DEFAULT_LEAVE_POLICY["lateConversion"], **((state["leavePolicy"].get("lateConversion") or {}))}
