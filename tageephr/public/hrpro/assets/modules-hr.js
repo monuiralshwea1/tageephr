@@ -797,11 +797,12 @@
                 <div class="tab-pane" id="attPane"></div>
             </div>`;
             const pane = document.getElementById('attPane');
-            const filters = { from: A.monthStart(), to: A.today(), employeeId: '', status: '', branchId: '' };
+            const filters = { from: A.monthStart(), to: A.today(), employeeId: '', status: '', branchId: '', shiftId: '' };
 
             const renderDaily = async () => {
-                const result = await A.get(`/attendance/daily?from=${filters.from}&to=${filters.to}${filters.employeeId ? '&employeeId=' + filters.employeeId : ''}${filters.status ? '&status=' + filters.status : ''}${filters.branchId ? '&branchId=' + filters.branchId : ''}`);
+                const result = await A.get(`/attendance/daily?from=${filters.from}&to=${filters.to}${filters.employeeId ? '&employeeId=' + filters.employeeId : ''}${filters.status ? '&status=' + filters.status : ''}${filters.branchId ? '&branchId=' + filters.branchId : ''}${filters.shiftId ? '&shiftId=' + filters.shiftId : ''}`);
                 const rows = result.data || [];
+                const periodCols = A.periodColumns(rows);
                 const summary = {
                     present: rows.filter(r => ['present', 'late', 'missing_punch'].includes(r.status)).length,
                     absent: rows.filter(r => r.status === 'absent').length,
@@ -814,6 +815,7 @@
                         <select id="attBranch"><option value="">كل الفروع</option>${A.options.branches().map(o => `<option value="${h(o.value)}" ${filters.branchId === o.value ? 'selected' : ''}>${h(o.label)}</option>`).join('')}</select>
                         <select id="attEmp"><option value="">كل الموظفين</option>${A.options.employees().map(o => `<option value="${h(o.value)}" ${filters.employeeId === o.value ? 'selected' : ''}>${h(o.label)}</option>`).join('')}</select>
                         <select id="attStatus"><option value="">كل الحالات</option>${['present', 'late', 'absent', 'leave', 'half_day', 'missing_punch'].map(s => `<option value="${s}" ${filters.status === s ? 'selected' : ''}>${A.statusLabel(s)}</option>`).join('')}</select>
+                        <select id="attShift"><option value="">كل الدوامات</option>${A.options.shifts().map(o => `<option value="${h(o.value)}" ${filters.shiftId === o.value ? 'selected' : ''}>${h(o.label)}</option>`).join('')}</select>
                         <span class="grow"></span>
                         ${A.can('attendance', 'edit') ? `<button class="btn btn-primary" id="attProcess">${A.icon('refresh')} معالجة الفترة</button><button class="btn" id="attConvert">${A.icon('exchange')} تحويل التأخير</button><button class="btn" id="attCorrect">${A.icon('plus')} معالجة بصمة</button>` : ''}
                     </div>
@@ -827,6 +829,8 @@
                         columns: [
                             { key: 'date', label: 'التاريخ', render: r => A.date(r.date) },
                             { key: 'employeeName', label: 'الموظف', render: r => `<strong>${h(r.employeeName)}</strong><br><span class="small muted">${h(A.deptName(r.departmentId))}</span>` },
+                            { key: 'shiftName', label: 'الدوام', render: r => r.shiftName ? h(r.shiftName) : '—' },
+                            ...periodCols,
                             { key: 'checkIn', label: 'الحضور', render: r => r.checkIn || '—' },
                             { key: 'checkOut', label: 'الانصراف', render: r => r.checkOut || '—' },
                             { key: 'lateMinutes', label: 'تأخير', align: 'left', render: r => r.lateMinutes ? `<span class="badge warning">${r.lateMinutes} د</span>` : '—' },
@@ -843,8 +847,8 @@
                         ] : [],
                         empty: 'لا توجد سجلات حضور للفترة المحددة — اضغط «معالجة الفترة» لاحتسابها من البصمات'
                     })}`;
-                const apply = () => { filters.from = document.getElementById('attFrom').value; filters.to = document.getElementById('attTo').value; filters.branchId = document.getElementById('attBranch').value; filters.employeeId = document.getElementById('attEmp').value; filters.status = document.getElementById('attStatus').value; renderDaily(); };
-                ['attFrom', 'attTo', 'attBranch', 'attEmp', 'attStatus'].forEach(id => { const el = document.getElementById(id); if (el) el.onchange = apply; });
+                const apply = () => { filters.from = document.getElementById('attFrom').value; filters.to = document.getElementById('attTo').value; filters.branchId = document.getElementById('attBranch').value; filters.employeeId = document.getElementById('attEmp').value; filters.status = document.getElementById('attStatus').value; filters.shiftId = document.getElementById('attShift').value; renderDaily(); };
+                ['attFrom', 'attTo', 'attBranch', 'attEmp', 'attStatus', 'attShift'].forEach(id => { const el = document.getElementById(id); if (el) el.onchange = apply; });
                 const processBtn = document.getElementById('attProcess');
                 if (processBtn) processBtn.onclick = async () => {
                     try {
@@ -914,6 +918,7 @@
                         columns: [
                             { key: 'date', label: 'التاريخ', render: r => A.date(r.date) },
                             { key: 'empName', label: 'الموظف' },
+                            { key: 'shiftName', label: 'الدوام', render: r => h(A.shiftName((A.employeeById(r.empId) || {}).shiftId)) },
                             { key: 'checkIn', label: 'الحضور', render: r => r.checkIn ? String(r.checkIn).replace('T', ' ').slice(0, 16) : '—' },
                             { key: 'checkOut', label: 'الانصراف', render: r => r.checkOut ? String(r.checkOut).replace('T', ' ').slice(0, 16) : '—' },
                             { key: 'typeLabel', label: 'النوع' },

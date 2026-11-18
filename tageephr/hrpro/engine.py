@@ -69,6 +69,105 @@ def shift_info(shift):
 	}
 
 
+def shift_periods(shift):
+	"""فترات الدوام مرتبة بحسب وقت البداية (مع تحويل الوقت إلى دقائق)."""
+	periods = []
+	for p in (shift or {}).get("periods") or []:
+		start = parse_time_to_minutes(p.get("startTime"))
+		end = parse_time_to_minutes(p.get("endTime"))
+		if start is None or end is None:
+			continue
+		end = end + 1440 if end <= start else end
+		periods.append({
+			"name": p.get("name") or "فترة",
+			"start": start, "end": end,
+			"graceMinutes": None if p.get("graceMinutes") in (None, "") else num(p.get("graceMinutes")),
+			"earlyGraceMinutes": None if p.get("earlyGraceMinutes") in (None, "") else num(p.get("earlyGraceMinutes")),
+		})
+	periods.sort(key=lambda x: x["start"])
+	return periods
+
+
+def punch_minutes_index(state, frm, to):
+	"""كل بصمات كل موظف في يوم مجمّعة في خريطة empId|date."""
+	from_d, to_d = date_only(frm), date_only(to)
+	index = {}
+	for rec in state.get("attendanceRecords") or []:
+		day = date_only(rec.get("date") or rec.get("punchTime") or rec.get("checkIn"))
+		if not day:
+			continue
+		if from_d and day < from_d:
+			continue
+		if to_d and day > to_d:
+			continue
+		key = "%s|%s" % (rec.get("empId"), day)
+		bucket = index.setdefault(key, set())
+		for minutes in collect_punch_times(rec):
+			bucket.add(int(minutes) % 1440)
+	return index
+
+
+def _period_match(times, start, end):
+	"""البصمات التي تقع داخل فترة الدوام (مع هامش 45 دقيقة)."""
+	matched = []
+	for t in times:
+		for candidate in (t, t + 1440):
+			if start - 45 <= candidate <= end + 45:
+				matched.append(candidate)
+				break
+	return sorted(matched)
+
+
+def period_slots(state, shift, times):
+	"""توزيع بصمات اليوم على فترات الدوام: دخول/خروج/تأخير/انصراف مبكر."""
+	settings = settings_grace(state)
+	periods = shift_periods(shift)
+	slots = []
+	for index, period in enumerate(periods):
+		grace = period["graceMinutes"] if period["graceMinutes"] is not None else settings["grace"]
+		early_grace = period["earlyGraceMinutes"] if period["earlyGraceMinutes"] is not None else settings["earlyGrace"]
+		matched = _period_match(times or [], period["start"], period["end"])
+		if not matched and len(periods) == 1 and times:
+			# دوام واحد فقط: نستخدم بصمات اليوم كاملة حتى لو كانت خارج نافذة الفترة
+			matched = sorted(set(times))
+		slot = {"name": period["name"], "startTime": _hhmm(period["start"] % 1440),
+		        "endTime": _hhmm(period["end"] % 1440), "in": "", "out": "",
+		        "lateMinutes": 0, "earlyMinutes": 0, "punches": len(matched)}
+		if matched:
+			first, last = matched[0], matched[-1]
+			slot["in"] = _hhmm(first % 1440)
+			if len(matched) > 1:
+				slot["out"] = _hhmm(last % 1440)
+			if first > period["start"] + grace:
+				slot["lateMinutes"] = int(round(first - period["start"] - grace))
+			if len(matched) > 1 and last < period["end"] - early_grace:
+				slot["earlyMinutes"] = int(round(period["end"] - early_grace - last))
+		slots.append(slot)
+	return slots
+
+
+def attach_shift_periods(state, rows, frm=None, to=None):
+	"""يضيف اسم الدوام وقيم كل فترة إلى صفوف الحضور."""
+	if not rows:
+		return rows
+	dates = [r.get("date") for r in rows if r.get("date")]
+	punch_index = punch_minutes_index(state, frm or (min(dates) if dates else ""), to or (max(dates) if dates else ""))
+	shifts = {s.get("id"): s for s in state.get("workShifts") or []}
+	employees = {e.get("id"): e for e in state.get("employees") or []}
+	result = []
+	for row in rows:
+		emp = employees.get(row.get("empId")) or {}
+		shift_id = row.get("shiftId") or emp.get("shiftId") or ""
+		shift = shifts.get(shift_id) or {}
+		item = dict(row)
+		item["shiftId"] = shift_id
+		item["shiftName"] = shift.get("name") or ""
+		times = punch_index.get("%s|%s" % (row.get("empId"), row.get("date")), set())
+		item["shiftPeriods"] = period_slots(state, shift, times)
+		result.append(item)
+	return result
+
+
 def holiday_set(state):
 	return {date_only(h.get("date") if isinstance(h, dict) else h) for h in (state.get("holidays") or [])}
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from uuid import uuid4
 
 from .utils import date_only, num, round2, today_iso
 
@@ -69,6 +70,11 @@ DEFAULT_ACCOUNTS = [
 	{"id": "acc_5103", "code": "5103", "name": "مصروفات عمومية وإدارية", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "debit"},
 	{"id": "acc_5104", "code": "5104", "name": "مصروفات تشغيلية", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "debit"},
 	{"id": "acc_5105", "code": "5105", "name": "مصروفات تسويق وإعلان", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "debit"},
+	{"id": "acc_2107", "code": "2107", "name": "مكافآت نهاية الخدمة المستحقة", "type": "liability", "parentId": "acc_21", "isGroup": False, "nature": "credit"},
+	{"id": "acc_5106", "code": "5106", "name": "البدلات والحوافز والإضافي", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "debit"},
+	{"id": "acc_5108", "code": "5108", "name": "خصومات الرواتب المستردة (غياب/جزاءات)", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "credit"},
+	{"id": "acc_5109", "code": "5109", "name": "مصروف مكافأة نهاية الخدمة", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "debit"},
+	{"id": "acc_5110", "code": "5110", "name": "حصة المنشأة في التأمينات الاجتماعية", "type": "expense", "parentId": "acc_5", "isGroup": False, "nature": "debit"},
 ]
 
 
@@ -621,3 +627,213 @@ def export_payload(report: dict) -> tuple[list[dict], list[dict]]:
 
 def dump(value) -> str:
 	return json.dumps(value, ensure_ascii=False)
+
+
+# ═════════════════════ الربط المحاسبي التلقائي ═════════════════════
+# كل عملية مالية في النظام (رواتب، خصومات، بدلات، تأمينات، سلف، قروض،
+# نهاية خدمة) تُرحَّل تلقائيًا كسند قيد يومية على بند حسابد محدد.
+# الربط يُخزَّن داخل settings.accountingMapping ويمكن تعديله من الواجهة.
+
+MAPPING_LABELS = {
+	"salaryExpense": "مصروف الرواتب الأساسية",
+	"allowanceExpense": "مصروف البدلات والحوافز والإضافي",
+	"employerGosiExpense": "مصروف حصة المنشأة في التأمينات",
+	"deductionRecovery": "استرداد خصومات الغياب والجزاءات (دائن)",
+	"eosExpense": "مصروف مكافأة نهاية الخدمة",
+	"gosiPayable": "التأمينات الاجتماعية المستحقة",
+	"taxPayable": "الضرائب المستحقة",
+	"salariesPayable": "الرواتب المستحقة الدفع",
+	"eosPayable": "مكافآت نهاية الخدمة المستحقة",
+	"advances": "سلف وقروض الموظفين (أصل)",
+	"cash": "النقدية بالصندوق",
+	"bank": "النقدية بالبنك",
+	"receivable": "العملاء (مدينون)",
+	"payable": "الموردون (دائنون)",
+	"generalExpense": "مصروفات عامة وأخرى",
+}
+
+DEFAULT_MAPPING = {
+	"salaryExpense": "5101",
+	"allowanceExpense": "5106",
+	"employerGosiExpense": "5110",
+	"deductionRecovery": "5108",
+	"eosExpense": "5109",
+	"gosiPayable": "2104",
+	"taxPayable": "2103",
+	"salariesPayable": "2102",
+	"eosPayable": "2107",
+	"advances": "1105",
+	"cash": "1101",
+	"bank": "1102",
+	"receivable": "1103",
+	"payable": "2101",
+	"generalExpense": "5103",
+}
+
+EVENT_LABELS = {
+	"payslip_accrual": "استحقاق راتب",
+	"payslip_payment": "صرف راتب",
+	"eos_accrual": "استحقاق نهاية خدمة",
+	"eos_payment": "صرف نهاية خدمة",
+	"advance_disbursement": "صرف سلفة موظف",
+	"advance_payment": "سداد سلفة موظف",
+	"loan_payment": "سداد قرض موظف",
+	"expense": "مصروف عام",
+	"manual": "قيد يدوي",
+}
+
+
+def ensure_default_accounts(state) -> list[dict]:
+	"""إضافة أي حسابات افتراضية جديدة إلى شجرة حسابات قائمة (ترحيل تلقائي)."""
+	rows = state.get("accounts")
+	if not isinstance(rows, list) or not rows:
+		rows = default_accounts()
+		state["accounts"] = rows
+		return rows
+	used_codes = {str(a.get("code")) for a in rows}
+	used_ids = {a.get("id") for a in rows}
+	changed = False
+	for account in default_accounts():
+		if str(account["code"]) in used_codes:
+			continue
+		row = dict(account)
+		if row["id"] in used_ids:
+			row["id"] = "acc_%s" % row["code"]
+		rows.append(row)
+		used_codes.add(str(row["code"]))
+		used_ids.add(row["id"])
+		changed = True
+	if changed:
+		state["accounts"] = rows
+	return rows
+
+
+def mapping(state) -> dict:
+	saved = ((state.get("settings") or {}).get("accountingMapping") or {})
+	out = {key: (str(saved.get(key)) if saved.get(key) else code) for key, code in DEFAULT_MAPPING.items()}
+	out["enabled"] = saved.get("enabled", True) is not False
+	return out
+
+
+def save_mapping(state, payload) -> dict:
+	current = mapping(state)
+	updated = dict(current)
+	for key in DEFAULT_MAPPING:
+		if key in (payload or {}):
+			value = str(payload.get(key) or "").strip()
+			if value:
+				updated[key] = value
+	if "enabled" in (payload or {}):
+		updated["enabled"] = payload.get("enabled") is not False
+	state.setdefault("settings", {})["accountingMapping"] = updated
+	return updated
+
+
+def account_for_code(state, code):
+	return next((a for a in accounts(state) if str(a.get("code")) == str(code)), None)
+
+
+def has_posting(state, event, ref_id) -> bool:
+	source = "%s:%s" % (event, ref_id)
+	return any(v.get("source") == source and (v.get("status") or "draft") != "cancelled"
+	           for v in state.get("vouchers") or [])
+
+
+def build_lines(state, entries) -> list[dict]:
+	"""entries: [(مفتاح ربط، مدين، دائن، بيان)] → سطور قيد جاهزة."""
+	index = {str(a.get("code")): a for a in accounts(state)}
+	lines = []
+	for key, debit, credit, note in entries:
+		debit, credit = round2(num(debit)), round2(num(credit))
+		if not debit and not credit:
+			continue
+		target = key if key in index else DEFAULT_MAPPING.get(key)
+		account = index.get(str(target))
+		if not account:
+			raise ValueError("لا يوجد حساب مربوط للمفتاح %s (الكود %s)" % (MAPPING_LABELS.get(key, key), target))
+		if account.get("isGroup"):
+			raise ValueError("الحساب المربوط حساب رئيسي ولا يقبل الترحيل: %s" % account.get("name"))
+		lines.append({"accountId": account.get("id"),
+		              "description": str(note or "").strip() or MAPPING_LABELS.get(key, ""),
+		              "debit": debit, "credit": credit, "partyType": "", "party": "", "dueDate": ""})
+	return lines
+
+
+def post_entry(state, event, ref_id, date, entries, description="", ref_type="", ref_number="",
+	           user="", branch_id="", currency="", notes="", allow_repeat=False):
+	"""ترحيل قيد تلقائي متوازن مرتبط بعملية مالية، مع منع التكرار."""
+	if not mapping(state).get("enabled", True):
+		return None
+	source = "%s:%s" % (event, ref_id)
+	if not allow_repeat:
+		existing = next((v for v in state.get("vouchers") or []
+		                 if v.get("source") == source and (v.get("status") or "draft") != "cancelled"), None)
+		if existing:
+			return existing
+	day = date_only(date) or today_iso()
+	lines = build_lines(state, entries)
+	if not lines:
+		return None
+	debit = round2(sum(num(l.get("debit")) for l in lines))
+	credit = round2(sum(num(l.get("credit")) for l in lines))
+	if abs(debit - credit) > 0.009:
+		raise ValueError("القيد التلقائي غير متوازن: مدين %s / دائن %s" % (debit, credit))
+	record = {
+		"id": "vc_auto_%s" % uuid4().hex[:16],
+		"type": "journal",
+		"number": next_voucher_number(state, "journal", day),
+		"date": day,
+		"description": str(description or EVENT_LABELS.get(event, "قيد تلقائي")).strip(),
+		"reference": str(ref_number or ""),
+		"branchId": branch_id or "",
+		"currency": currency or "",
+		"notes": str(notes or ""),
+		"lines": lines, "debit": debit, "credit": credit,
+		"status": "posted", "isOpening": False,
+		"auto": True, "event": event, "eventLabel": EVENT_LABELS.get(event, event),
+		"source": source, "sourceType": ref_type, "sourceId": ref_id,
+		"createdAt": datetime.now().isoformat(timespec="seconds"),
+		"postedAt": datetime.now().isoformat(timespec="seconds"),
+		"createdBy": user or "system",
+	}
+	state.setdefault("vouchers", []).append(record)
+	return record
+
+
+def payslip_entries(slip):
+	"""سطور استحقاق كشف الراتب: مصروفات مقابل التزامات وخصومات."""
+	gross = num(slip.get("grossSalary"))
+	basic = num(slip.get("basicEarning"))
+	if basic <= 0:
+		basic = gross
+	extra = round2(gross - basic)
+	gosi_employee = num(slip.get("gosiEmployeeShare"))
+	gosi_employer = num(slip.get("gosiEmployerShare"))
+	tax = num(slip.get("tax"))
+	advances = round2(num(slip.get("advanceDeduction")) + num(slip.get("loanDeduction")))
+	net = num(slip.get("netSalary"))
+	recovery = round2(num(slip.get("totalDeductionsAll")) - gosi_employee - tax - advances)
+	name = slip.get("employeeName") or ""
+	recovery_debit = recovery < 0
+	entries = [
+		("salaryExpense", basic, 0, "راتب أساسي — %s" % name),
+		("allowanceExpense", extra, 0, "بدلات ومكافآت — %s" % name),
+		("employerGosiExpense", gosi_employer, 0, "حصة المنشأة في التأمينات — %s" % name),
+		("gosiPayable", 0, round2(gosi_employee + gosi_employer), "تأمينات مستحقة — %s" % name),
+		("taxPayable", 0, tax, "ضرائب مستحقة — %s" % name),
+		("advances", 0, advances, "استقطاع سلف وقروض — %s" % name),
+		("deductionRecovery", abs(recovery) if recovery_debit else 0, 0 if recovery_debit else recovery,
+		 "استرداد خصومات الغياب والجزاءات — %s" % name),
+		("salariesPayable", 0, net, "صافي الراتب المستحق — %s" % name),
+	]
+	return entries
+
+
+def payslip_payment_entries(slip, method=""):
+	"""سطور صرف كشف الراتب: إقفال الالتزام مقابل الصندوق/البنك."""
+	name = slip.get("employeeName") or ""
+	account_key = "bank" if str(method or slip.get("paymentMethod") or "").lower() in ("bank", "transfer", "cheque", "check") else "cash"
+	return [
+		("salariesPayable", num(slip.get("netSalary")), 0, "سداد صافي راتب — %s" % name),
+		(account_key, 0, num(slip.get("netSalary")), "صرف من %s — %s" % ("البنك" if account_key == "bank" else "الصندوق", name)),
+	]

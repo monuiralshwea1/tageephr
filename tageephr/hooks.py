@@ -265,6 +265,13 @@ add_to_apps_screen = [
 
 
 scheduler_events = {
+	"cron": {
+		# توليد كشوف الرواتب تلقائياً كل يوم في السابعة صباحاً
+		# (الإنشاء الفعلي يحدث فقط في اليوم المحدد بإعدادات الرواتب)
+		"0 7 * * *": [
+			"tageephr.hrpro.tasks.auto_generate_payslips",
+		],
+	},
 	"daily": [
 		"tageephr.hrpro.tasks.daily_backup",
 		"tageephr.hrpro.tasks.nightly_notifications",

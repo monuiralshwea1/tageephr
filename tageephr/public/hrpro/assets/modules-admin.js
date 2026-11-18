@@ -134,6 +134,16 @@
                     deductions: rows.reduce((s, r) => s + A.num(r.totalDeductionsAll), 0)
                 };
                 const mode = (A.state.data.payrollSettings || {}).payslipMode || 'auto';
+                const allowanceNames = [];
+                (A.state.data.allowanceTypes || []).forEach(t => { if (t.name && !allowanceNames.includes(t.name)) allowanceNames.push(t.name); });
+                rows.forEach(r => (r.allowances || []).forEach(a => { if (a.name && !allowanceNames.includes(a.name)) allowanceNames.push(a.name); }));
+                const allowanceColumns = allowanceNames.map(name => ({
+                    key: `alw_${name}`, label: name, align: 'left',
+                    render: r => {
+                        const item = (r.allowances || []).find(a => a.name === name);
+                        return item ? A.money(item.amount) : '—';
+                    }
+                }));
                 pane.innerHTML = `
                     <div class="toolbar" style="padding:0 0 14px;border:0">
                         <select id="payPeriod"><option value="">كل الفترات</option>${periods.map(p => `<option value="${p.id}" ${filters.periodId === p.id ? 'selected' : ''}>${h(p.name)} (${p.status === 'closed' ? 'مغلقة' : 'مفتوحة'})</option>`).join('')}</select>
@@ -151,7 +161,9 @@
                     ${A.table({
                         columns: [
                             { key: 'employeeName', label: 'الموظف', render: r => `<div class="employee-cell"><div class="avatar">${h(A.initials(r.employeeName))}</div><div><strong>${h(r.employeeName)}</strong><small>${h(r.employeeNumber || '')} • ${h(A.deptName(r.departmentId))}</small></div></div>` },
+                            { key: 'branchId', label: 'الفرع', render: r => h(A.branchName(r.branchId)) },
                             { key: 'month', label: 'الفترة', render: r => `${A.monthName(r.month)} ${r.year}` },
+                            ...allowanceColumns,
                             { key: 'presentDays', label: 'حضور', align: 'left', render: r => A.numFmt(r.presentDays) },
                             { key: 'grossSalary', label: 'الإجمالي', align: 'left', render: r => A.money(r.grossSalary) },
                             { key: 'totalDeductionsAll', label: 'الخصومات', align: 'left', render: r => A.money(r.totalDeductionsAll) },
@@ -823,7 +835,7 @@
             const reportGroups = Object.keys(categories).map(key => ({ key, label: categories[key], items: catalog.filter(r => r.category === key) }));
 
             view.innerHTML = `
-                <div class="split">
+                <div class="split reports-split">
                     <div>
                         <div class="card card-pad mb">
                             <div class="row" style="align-items:flex-start">
@@ -839,6 +851,7 @@
                                 <div class="field" style="margin:0"><label>الفرع</label><select id="repBranch"><option value="">كل الفروع</option>${A.options.branches().map(o => `<option value="${h(o.value)}">${h(o.label)}</option>`).join('')}</select></div>
                                 <div class="field" style="margin:0"><label>القسم</label><select id="repDept"><option value="">كل الأقسام</option>${A.options.departments().map(o => `<option value="${h(o.value)}">${h(o.label)}</option>`).join('')}</select></div>
                                 <div class="field" style="margin:0"><label>الموظف</label><select id="repEmp"><option value="">كل الموظفين</option>${A.options.employees().map(o => `<option value="${h(o.value)}">${h(o.label)}</option>`).join('')}</select></div>
+                                <div class="field" style="margin:0"><label>الدوام</label><select id="repShift"><option value="">كل الدوامات</option>${A.options.shifts().map(o => `<option value="${h(o.value)}">${h(o.label)}</option>`).join('')}</select></div>
                                 <div class="field" style="margin:0"><label>الحالة</label><select id="repStatus"><option value="">كل الحالات</option>${[['new', 'جديدة'], ['in_progress', 'قيد التنفيذ'], ['on_hold', 'معلّقة'], ['completed', 'مكتملة'], ['cancelled', 'ملغاة'], ['pending', 'طلبات معلّقة'], ['approved', 'معتمد'], ['rejected', 'مرفوض']].map(([v, l]) => `<option value="${v}">${h(l)}</option>`).join('')}</select></div>
                                 <div class="field" style="margin:0"><label>الأولوية</label><select id="repPriority"><option value="">كل الأولويات</option>${[['low', 'منخفضة'], ['normal', 'عادية'], ['high', 'عالية'], ['urgent', 'عاجلة']].map(([v, l]) => `<option value="${v}">${h(l)}</option>`).join('')}</select></div>
                                 <label class="switch" style="margin:0 0 14px"><input type="checkbox" id="repOverdue"> المتأخرة فقط</label>
@@ -850,6 +863,7 @@
                             <div class="toolbar">
                                 <div id="repTitle" style="font-weight:700">—</div>
                                 <span class="grow"></span>
+                                                <input type="search" id="repSearch" placeholder="بحث في النتائج..." style="max-width:220px">
                                 <button class="btn btn-sm" id="repColumns">${A.icon('filter')} الأعمدة</button>
                                 <button class="btn btn-sm" id="repExcel">${A.icon('download')} Excel</button>
                                 <button class="btn btn-sm" id="repCsv">${A.icon('download')} CSV</button>
@@ -891,6 +905,7 @@
                 branchId: document.getElementById('repBranch').value,
                 departmentId: document.getElementById('repDept').value,
                 employeeId: document.getElementById('repEmp').value,
+                shiftId: document.getElementById('repShift') ? document.getElementById('repShift').value : '',
                 status: document.getElementById('repStatus') ? document.getElementById('repStatus').value : '',
                 priority: document.getElementById('repPriority') ? document.getElementById('repPriority').value : '',
                 onlyOverdue: document.getElementById('repOverdue') ? document.getElementById('repOverdue').checked : false,
@@ -912,9 +927,18 @@
                 }
             };
 
+            const visibleRows = () => {
+                const r = state.result;
+                if (!r) return [];
+                const query = String(state.query || '').trim().toLowerCase();
+                if (!query) return r.rows;
+                return r.rows.filter(row => r.columns.some(c => String(row[c.key] === undefined || row[c.key] === null ? '' : row[c.key]).toLowerCase().includes(query)));
+            };
+
             const renderResult = () => {
                 const r = state.result;
                 if (!r) return;
+                const rows = visibleRows();
                 document.getElementById('repTitle').textContent = `${r.title} — ${A.date(r.from)} إلى ${A.date(r.to)}`;
                 const columns = r.columns.map(c => ({
                     key: c.key, label: c.label, align: c.type === 'number' || c.type === 'money' ? 'left' : '',
@@ -930,8 +954,8 @@
                 const hasTotals = Object.keys(r.totals || {}).length > 0;
                 const footerCells = hasTotals ? r.columns.map((c, i) => ({ content: i === 0 ? 'الإجمالي' : (r.totals[c.key] !== undefined ? (c.type === 'money' ? A.money(r.totals[c.key]) : A.numFmt(r.totals[c.key])) : ''), align: c.type === 'money' || c.type === 'number' ? 'left' : '' })) : null;
                 document.getElementById('repResult').innerHTML = `
-                    <div class="toolbar" style="border-bottom:0"><span class="small muted">${A.numFmt(r.count)} سجل</span></div>
-                    ${A.table({ columns, rows: r.rows, footer: footerCells, empty: 'لا توجد نتائج للفلاتر المحددة' })}`;
+                    <div class="toolbar" style="border-bottom:0"><span class="small muted">${A.numFmt(rows.length)} سجل${state.query ? ` من ${A.numFmt(r.count)}` : ''}</span></div>
+                    ${A.table({ columns, rows, footer: footerCells, empty: 'لا توجد نتائج للفلاتر المحددة' })}`;
             };
 
             document.getElementById('repSelect').onchange = e => { state.reportId = e.target.value; state.columns = null; updateDesc(); };
@@ -944,6 +968,8 @@
                 run();
             }));
             document.getElementById('repRun').onclick = run;
+            const searchInput = document.getElementById('repSearch');
+            if (searchInput) searchInput.oninput = e => { state.query = e.target.value; renderResult(); };
 
             document.getElementById('repExcel').onclick = async () => {
                 if (!state.result) return A.toast('شغّل التقرير أولًا', 'warning');
@@ -963,7 +989,7 @@
                     title: state.result.title,
                     subtitle: `${A.date(state.result.from)} → ${A.date(state.result.to)}`,
                     landscape: state.result.columns.length > 7,
-                    html: `<table class="data"><thead><tr>${state.result.columns.map(c => `<th>${h(c.label)}</th>`).join('')}</tr></thead><tbody>${state.result.rows.map(row => `<tr>${state.result.columns.map(c => `<td>${c.type === 'money' ? A.money(row[c.key]) : c.type === 'number' ? A.numFmt(row[c.key]) : c.type === 'date' ? A.date(row[c.key]) : c.type === 'datetime' ? A.dateTime(row[c.key]) : h(row[c.key])}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+                    html: `<table class="data"><thead><tr>${state.result.columns.map(c => `<th>${h(c.label)}</th>`).join('')}</tr></thead><tbody>${visibleRows().map(row => `<tr>${state.result.columns.map(c => `<td>${c.type === 'money' ? A.money(row[c.key]) : c.type === 'number' ? A.numFmt(row[c.key]) : c.type === 'date' ? A.date(row[c.key]) : c.type === 'datetime' ? A.dateTime(row[c.key]) : h(row[c.key])}</td>`).join('')}</tr>`).join('')}</tbody></table>`
                 });
             };
             document.getElementById('repColumns').onclick = () => {
@@ -1005,6 +1031,7 @@
                 if (f.branchId) document.getElementById('repBranch').value = f.branchId;
                 if (f.departmentId) document.getElementById('repDept').value = f.departmentId;
                 if (f.employeeId) document.getElementById('repEmp').value = f.employeeId;
+                if (f.shiftId) document.getElementById('repShift').value = f.shiftId;
                 if (f.periodId) document.getElementById('repPeriod').value = f.periodId;
                 updateDesc();
                 run();
@@ -1240,7 +1267,7 @@
                     <div class="field"><label>بداية تتبع الحضور (لا يُحتسب قبلها غياب)</label><input type="date" id="s_attendanceStartDate" value="${h(s.attendanceStartDate || '')}"></div>
                     <div class="field"><label>حد الغياب العام (دقيقة تأخير)</label><input type="number" min="0" id="s_lateAbsenceMinutes" value="${s.lateAbsenceMinutes || 0}"><div class="help">0 = معطّل. عند تجاوز هذا الحد يُحتسب اليوم غيابًا حتى لو بصم الموظف.</div></div>
                     <div class="field"><label>لون النظام الأساسي</label><input type="color" id="s_themeColor" value="${h(s.themeColor || '#0d9488')}" style="height:40px;padding:3px"></div>
-                    <div class="field"><label>لون القائمة الجانبية</label><input type="color" id="s_sidebarColor" value="${h(s.sidebarColor || '#0b1526')}" style="height:40px;padding:3px"></div>
+                    <div class="field"><label>لون القائمة الجانبية</label><input type="color" id="s_sidebarColor" value="${h((s.sidebarColor && String(s.sidebarColor).toLowerCase() !== '#0b1526') ? s.sidebarColor : '#3F51B5')}" style="height:40px;padding:3px"></div>
                     <div class="field full"><label>أيام العطلة الأسبوعية</label><div class="checks">${weeks.map(w => `<label><input type="checkbox" name="weeklyOff" value="${w.v}" ${weeklyOff.includes(w.v) ? 'checked' : ''}> ${w.l}</label>`).join('')}</div></div>
                     <div class="form-section full"><h4>${A.icon('shield')} التأمينات والضرائب</h4></div>
                     <div class="field"><label>نسبة التأمينات — الموظف %</label><input type="number" step="0.01" id="s_gosiEmployeeRate" value="${s.gosiEmployeeRate || 0}"></div>

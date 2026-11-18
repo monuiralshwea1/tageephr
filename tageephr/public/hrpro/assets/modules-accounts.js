@@ -27,7 +27,7 @@
     const STATUS = { draft: ['مسودة', ''], posted: ['مُرحّل', 'success'], cancelled: ['ملغي', 'danger'] };
     const PARTY = { '': 'بدون', customer: 'عميل', supplier: 'مورد', employee: 'موظف', other: 'أخرى' };
 
-    const cache = { tree: [], summary: null, vouchers: [], reports: [] };
+    const cache = { tree: [], summary: null, vouchers: [], reports: [], mapping: null, mappingRows: [] };
     let activeTab = 'overview';
     let container = null;
     let filters = {
@@ -64,16 +64,19 @@
     }
 
     async function loadAll() {
-        const [tree, summary, vouchers, reports] = await Promise.all([
+        const [tree, summary, vouchers, reports, mapping] = await Promise.all([
             A.get('/accounts/tree'),
             A.get('/accounts/summary'),
             A.get('/vouchers?limit=1000'),
-            A.get('/accounting/reports/catalog')
+            A.get('/accounting/reports/catalog'),
+            A.get('/accounts/mapping')
         ]);
         cache.tree = tree.data || [];
         cache.summary = summary.data || {};
         cache.vouchers = vouchers.data || [];
         cache.reports = reports.data || [];
+        cache.mapping = mapping.data || null;
+        cache.mappingRows = (mapping.data && mapping.data.rows) || [];
     }
 
     // ═══════════════════ الإطار والتبويبات ═══════════════════
@@ -83,7 +86,8 @@
         { id: 'vouchers', label: 'السندات والقيود' },
         { id: 'opening', label: 'القيود الافتتاحية' },
         { id: 'statement', label: 'كشف حساب' },
-        { id: 'reports', label: 'التقارير المالية' }
+        { id: 'reports', label: 'التقارير المالية' },
+        { id: 'integration', label: 'الربط المحاسبي' }
     ];
 
     function renderTabBar() {
@@ -109,6 +113,60 @@
         if (activeTab === 'opening') return renderOpening(body);
         if (activeTab === 'statement') return renderStatement(body);
         if (activeTab === 'reports') return renderReports(body);
+        if (activeTab === 'integration') return renderIntegration(body);
+    }
+
+    // ═══════════════════ الربط المحاسبي التلقائي ═══════════════════
+    function renderIntegration(body) {
+        const mapping = (cache.mapping && cache.mapping.mapping) || cache.mapping || {};
+        const enabled = mapping.enabled !== false;
+        const rows = cache.mappingRows.length
+            ? cache.mappingRows
+            : Object.keys(mapping).filter(k => k !== 'enabled').map(k => ({ key: k, label: k, code: mapping[k] }));
+        const postable = cache.tree.filter(a => !a.isGroup);
+        body.innerHTML = `
+            <div class="alert info mb">${A.icon('alert')}<div>
+                كل عملية مالية (استحقاق رواتب، خصومات، بدلات، تأمينات، سلف وقروض، صرف رواتب، مكافأة نهاية خدمة)
+                تُرحَّل تلقائيًا كقيد يومية على الحساب المحدد هنا. القيود الناتجة تظهر في تبويب «السندات والقيود»
+                وتُحسب في الميزان والدفتر والميزانية وقائمة الدخل.
+            </div></div>
+            <div class="card mb">
+                <div class="card-head"><h3>الترحيل التلقائي</h3><span class="spacer"></span>
+                    <label class="switch"><input type="checkbox" id="accAutoPost" ${enabled ? 'checked' : ''}> مفعّل</label>
+                </div>
+                <div class="card-pad">
+                    <div class="grid grid-2" id="accMappingGrid">
+                        ${rows.map(r => `<div class="field"><label>${h(r.label)}</label>
+                            <select data-acc-map="${h(r.key)}">${postable.map(a => `<option value="${h(a.code)}" ${String(a.code) === String(mapping[r.key] || r.code) ? 'selected' : ''}>${h((a.code ? a.code + ' — ' : '') + a.name)}</option>`).join('')}</select></div>`).join('')}
+                    </div>
+                </div>
+                <div class="toolbar" style="padding:12px 16px;border-top:1px solid var(--line)">
+                    <button class="btn btn-primary" id="accSaveMapping">${A.icon('check')} حفظ الربط</button>
+                    <button class="btn" id="accSyncPostings">${A.icon('play')} ترحيل القيود الناقصة</button>
+                    <span class="grow"></span>
+                    <span class="small muted">${A.numFmt(rows.length)} بند محاسبي مربوط</span>
+                </div>
+            </div>`;
+
+        const saveBtn = document.getElementById('accSaveMapping');
+        if (saveBtn) saveBtn.onclick = async () => {
+            const payload = { enabled: document.getElementById('accAutoPost').checked };
+            body.querySelectorAll('[data-acc-map]').forEach(sel => { payload[sel.dataset.accMap] = sel.value; });
+            try {
+                await A.put('/accounts/mapping', { mapping: payload });
+                A.toast('تم حفظ الربط المحاسبي');
+                await refreshAll();
+            } catch (err) { A.toast(err.message, 'error'); }
+        };
+        const syncBtn = document.getElementById('accSyncPostings');
+        if (syncBtn) syncBtn.onclick = async () => {
+            if (!(await A.confirm({ title: 'ترحيل القيود الناقصة', message: 'سيتم إنشاء قيود محاسبية لكل العمليات المالية السابقة التي لم تُرحّل بعد. متابعة؟', confirmLabel: 'ترحيل' }))) return;
+            try {
+                const res = await A.post('/accounts/postings/sync', {});
+                A.toast((res && res.message) || 'تم الترحيل', 'success');
+                await refreshAll();
+            } catch (err) { A.toast(err.message, 'error'); }
+        };
     }
 
     // ═══════════════════ نظرة عامة ═══════════════════
@@ -124,7 +182,7 @@
             <div class="grid grid-4 mb">${kpi('الإيرادات', s.revenue, 'download')}${kpi('المصروفات', s.expense, 'upload')}
                 ${kpi('النقدية (صندوق/بنك)', s.cash, 'wallet')}
                 <div class="kpi"><div class="kpi-top"><span>السندات والقيود</span>${A.icon('file')}</div><div class="kpi-value">${A.numFmt(s.vouchers)}</div></div></div>
-            <div class="grid grid-2">
+            <div class="grid acc-overview-split">
                 <div class="card">
                     <div class="card-head"><h3>أحدث السندات والقيود</h3><span class="spacer"></span>
                         <button class="btn btn-sm" id="accGoVouchers">${A.icon('list')} عرض الكل</button></div>
@@ -356,6 +414,7 @@
                     { key: 'description', label: 'البيان' },
                     { key: 'party', label: 'الطرف' },
                     { key: 'debit', label: 'المبلغ', align: 'left', render: r => money(r.debit) },
+                    { key: 'source', label: 'المصدر', render: r => r.auto ? `<span class="badge success">${h(r.eventLabel || 'تلقائي')}</span>` : '<span class="small muted">يدوي</span>' },
                     { key: 'status', label: 'الحالة', render: r => badge(r.status || 'draft') }
                 ],
                 rows,

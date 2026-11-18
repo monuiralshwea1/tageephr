@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .engine import LEAVE_STATUS_LABELS, attendance_for, attendance_summary_for_employee
+from .engine import (LEAVE_STATUS_LABELS, attach_shift_periods, attendance_for, attendance_summary_for_employee,
+                     period_slots, punch_minutes_index, shift_periods)
 from .utils import date_only, month_range, num, round2, today_iso, working_dates
 
 REPORT_CATALOG = [
@@ -14,6 +15,9 @@ REPORT_CATALOG = [
 	{"id": "missing_punches", "name": "البصمات الناقصة", "category": "fingerprint", "icon": "alert", "description": "السجلات التي تنقصها بصمة دخول أو خروج"},
 	{"id": "raw_punches", "name": "سجلات البصمة الخام", "category": "fingerprint", "icon": "fingerprint", "description": "كل بصمة كما وردت من الأجهزة مع مصدرها وجهازها"},
 	{"id": "device_status", "name": "حالة أجهزة البصمة", "category": "fingerprint", "icon": "router", "description": "الأجهزة المسجلة وآخر مزامنة وعدد السجلات"},
+	{"id": "fingerprint_sheet", "name": "كشف البصمة للموظفين", "category": "fingerprint", "icon": "fingerprint", "description": "كشف بصمة يومي لكل موظف: الدوام والفترات والحضور والانصراف والتأخير لكل فترة"},
+	{"id": "employee_monthly_periods", "name": "التقرير الشهري للموظف بالفترات", "category": "monthly", "icon": "calendar", "description": "كل يوم لكل موظف مع فترات الدوام والحضور والانصراف وتأخير كل فترة"},
+	{"id": "duty_report", "name": "تقرير الدوام اليومي", "category": "daily", "icon": "clock", "description": "تقرير دوام الموظفين مع كل البصمات والأحداث والملاحظات وخصم التأخير"},
 	{"id": "attendance_compliance", "name": "الالتزام بالدوام", "category": "monthly", "icon": "check", "description": "نسبة الحضور والالتزام لكل موظف"},
 	{"id": "overtime_report", "name": "تقرير العمل الإضافي", "category": "monthly", "icon": "plus", "description": "دقائق الإضافي وقيمتها المالية"},
 	{"id": "leave_balances", "name": "أرصدة الإجازات", "category": "leaves", "icon": "palmtree", "description": "الأرصدة المستحقة والمستخدمة والمتبقية لكل نوع إجازة"},
@@ -105,10 +109,25 @@ COLUMNS = {
 	                    column("totalDeductionsAll", "الخصومات", "money"), column("netSalary", "الصافي", "money"),
 	                    column("statusLabel", "الحالة")],
 	"payslip_register": [column("month", "الشهر"), column("year", "السنة"), column("employeeNumber", "الرقم"),
-	                     column("employeeName", "الموظف"), column("baseSalary", "الراتب الأساسي", "money"),
+	                     column("employeeName", "الموظف"), column("branchName", "الفرع"), column("baseSalary", "الراتب الأساسي", "money"),
 	                     column("totalAllowances", "البدلات", "money"), column("overtimeAmount", "الإضافي", "money"),
 	                     column("absenceDeduction", "خصم الغياب", "money"), column("lateDeduction", "خصم التأخير", "money"),
 	                     column("gosiEmployeeShare", "التأمينات", "money"), column("netSalary", "الصافي", "money")],
+	"fingerprint_sheet": [column("date", "التاريخ", "date"), column("employeeNumber", "الرقم"), column("employeeName", "الموظف"),
+	                     column("branchName", "الفرع"),
+	                     column("checkIn", "أول بصمة"), column("checkOut", "آخر بصمة"),
+	                     column("lateMinutes", "تأخير اليوم (دقيقة)", "number"), column("earlyMinutes", "انصراف مبكر (دقيقة)", "number"),
+	                     column("statusLabel", "الحالة")],
+	"employee_monthly_periods": [column("date", "التاريخ", "date"), column("dayName", "اليوم"), column("employeeNumber", "الرقم"),
+	                             column("employeeName", "الموظف"), column("branchName", "الفرع"), column("shiftName", "الدوام"),
+	                             column("periodName", "الفترة"), column("periodIn", "الحضور"), column("periodOut", "الانصراف"),
+	                             column("periodLate", "تأخير الفترة", "number"), column("periodEarly", "انصراف مبكر", "number"),
+	                             column("lateMinutes", "تأخير اليوم", "number"), column("statusLabel", "الحالة")],
+	"duty_report": [column("date", "التاريخ", "date"), column("dayName", "اليوم"), column("employeeNumber", "الرقم"),
+	                column("employeeName", "الموظف"), column("branchName", "الفرع"),
+	                column("punches", "الأحداث"), column("checkIn", "الحضور"), column("checkOut", "الانصراف"),
+	                column("lateMinutes", "دقائق التأخير", "number"), column("earlyMinutes", "انصراف مبكر", "number"),
+	                column("deduction", "المبلغ المخصوم", "money"), column("statusLabel", "الحالة"), column("notes", "ملاحظة")],
 	"department_report": [column("departmentName", "القسم"), column("branchName", "الفرع"),
 	                      column("employees", "عدد الموظفين", "number"), column("totalSalaries", "إجمالي الرواتب", "money"),
 	                      column("averageSalary", "متوسط الراتب", "money")],
@@ -133,6 +152,58 @@ COLUMNS = {
 PS_STATUS = {"draft": "مسودّة", "approved": "معتمد", "paid": "مدفوع"}
 EMP_STATUS = {"active": "على رأس العمل", "terminated": "منتهي الخدمة", "on_leave": "إجازة"}
 MONTHS_AR = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+WEEKDAYS_AR = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+PERIOD_REPORTS = ("daily_attendance", "late_report", "absence_report", "missing_punches", "overtime_report",
+                  "fingerprint_sheet", "duty_report")
+
+
+def weekday_name(day):
+	try:
+		return WEEKDAYS_AR[datetime.strptime(day, "%Y-%m-%d").weekday()]
+	except Exception:
+		return ""
+
+
+def period_columns(state, rows):
+	"""أعمدة فترات الدوام المشتقة من الدوامات المستخدمة في التقرير."""
+	shifts = {s.get("id"): s for s in state.get("workShifts") or []}
+	used, seen = [], set()
+	for row in rows:
+		sid = row.get("shiftId") or ""
+		if not sid or sid in seen or sid not in shifts:
+			continue
+		seen.add(sid)
+		used.append(shifts[sid])
+	used.sort(key=lambda s: s.get("name") or "")
+	# أعمدة الفترات: لكل فترة عند وجود دوامات قليلة في التقرير أو دوام متعدد الفترات
+	chosen = used if len(used) <= 3 else [s for s in used if len(shift_periods(s)) > 1]
+	columns = []
+	for shift in chosen:
+		for index, period in enumerate(shift_periods(shift)):
+			columns.append(column("period:%s:%d" % (shift.get("id"), index),
+			                      "%s — %s" % (period["name"], shift.get("name") or "دوام")))
+	return columns
+
+
+def period_values(row):
+	"""قيم خلايا الفترات لصف واحد."""
+	values = {}
+	for index, slot in enumerate(row.get("shiftPeriods") or []):
+		in_time, out_time = slot.get("in") or "", slot.get("out") or ""
+		text = "%s — %s" % (in_time or "—", out_time or "—") if (in_time or out_time) else "—"
+		if slot.get("lateMinutes"):
+			text += " (تأخير %d)" % slot["lateMinutes"]
+		elif slot.get("earlyMinutes"):
+			text += " (مبكر %d)" % slot["earlyMinutes"]
+		values["period:%s:%d" % (row.get("shiftId"), index)] = text
+	return values
+
+
+def insert_columns(columns, extra, after_key):
+	if not extra:
+		return columns
+	index = next((i for i, c in enumerate(columns) if c["key"] == after_key), len(columns) - 1)
+	return columns[:index + 1] + extra + columns[index + 1:]
 
 
 def _filters(filters, default_days=30):
@@ -161,6 +232,7 @@ def run_report(state, report_id, filters=None, columns=None):
 	branch_id = (filters.get("branchId") or "").strip()
 	department_id = (filters.get("departmentId") or "").strip()
 	employee_id = (filters.get("employeeId") or "").strip()
+	shift_id = (filters.get("shiftId") or "").strip()
 
 	def keep(emp_id):
 		emp = employees.get(emp_id) or {}
@@ -168,13 +240,18 @@ def run_report(state, report_id, filters=None, columns=None):
 			return False
 		if department_id and emp.get("departmentId") != department_id:
 			return False
+		if shift_id and emp.get("shiftId") != shift_id:
+			return False
 		if employee_id and emp_id != employee_id:
 			return False
 		return True
 
-	if report_id in ("daily_attendance", "late_report", "absence_report", "missing_punches", "overtime_report"):
+	if report_id in ("daily_attendance", "late_report", "absence_report", "missing_punches", "overtime_report",
+	                 "fingerprint_sheet", "duty_report"):
 		status_filter = {"daily_attendance": None, "late_report": "late", "absence_report": "absent",
-		                 "missing_punches": "missing_punch", "overtime_report": None}[report_id]
+		                 "missing_punches": "missing_punch", "overtime_report": None,
+		                 "fingerprint_sheet": None, "duty_report": None}[report_id]
+		punch_map = punch_minutes_index(state, frm, to)
 		for r in attendance_for(state, frm, to, {"status": status_filter}):
 			if not keep(r.get("empId")):
 				continue
@@ -182,6 +259,7 @@ def run_report(state, report_id, filters=None, columns=None):
 			branch = branches.get(r.get("branchId")) or {}
 			dept = departments.get(r.get("departmentId")) or {}
 			base = {
+				"empId": r.get("empId"), "shiftId": r.get("shiftId") or emp.get("shiftId") or "",
 				"date": r.get("date"), "employeeNumber": r.get("employeeNumber") or emp.get("employeeNumber") or "",
 				"employeeName": r.get("employeeName") or emp.get("name") or "",
 				"branchName": branch.get("name") or "", "departmentName": dept.get("name") or "",
@@ -210,6 +288,18 @@ def run_report(state, report_id, filters=None, columns=None):
 			elif report_id == "missing_punches":
 				if r.get("status") == "missing_punch":
 					rows.append(base)
+			elif report_id in ("fingerprint_sheet", "duty_report"):
+				wage = num(emp.get("baseSalary"))
+				minute_rate = wage / 30.0 / 480.0
+				times = sorted(punch_map.get("%s|%s" % (r.get("empId"), r.get("date")), set()))
+				base.update({
+					"dayName": weekday_name(r.get("date")),
+					"punches": " | ".join("%02d:%02d" % (t // 60, t % 60) for t in times),
+					"lateMinutes": round2(r.get("lateMinutes")), "earlyMinutes": round2(r.get("earlyMinutes")),
+					"deduction": round2((num(r.get("lateMinutes")) + num(r.get("earlyMinutes"))) * minute_rate),
+				})
+				if report_id == "duty_report" or times:
+					rows.append(base)
 			else:
 				if num(r.get("overtimeMinutes")) > 0:
 					hourly = num(emp.get("baseSalary")) / 30.0 / 8.0
@@ -236,6 +326,32 @@ def run_report(state, report_id, filters=None, columns=None):
 				"lateDays": summary["lateDays"], "lateMinutes": round2(summary["lateMinutes"]),
 				"overtimeMinutes": round2(summary["overtimeMinutes"]), "compliance": compliance,
 			})
+
+	elif report_id == "employee_monthly_periods":
+		punch_map = punch_minutes_index(state, frm, to)
+		for r in attendance_for(state, frm, to):
+			if not keep(r.get("empId")):
+				continue
+			emp = employees.get(r.get("empId")) or {}
+			shift = next((s for s in state.get("workShifts") or [] if s.get("id") == (r.get("shiftId") or emp.get("shiftId"))), {})
+			slots = period_slots(state, shift, sorted(punch_map.get("%s|%s" % (r.get("empId"), r.get("date")), set())))
+			common = {
+				"date": r.get("date"), "dayName": weekday_name(r.get("date")),
+				"employeeNumber": r.get("employeeNumber") or emp.get("employeeNumber") or "",
+				"employeeName": r.get("employeeName") or emp.get("name") or "",
+				"branchName": (branches.get(r.get("branchId")) or {}).get("name") or "",
+				"shiftName": shift.get("name") or "",
+				"lateMinutes": round2(r.get("lateMinutes")),
+				"statusLabel": STATUS_LABELS.get(r.get("status"), r.get("status") or ""),
+			}
+			if not slots:
+				rows.append({**common, "periodName": "—", "periodIn": r.get("checkIn") or "",
+				             "periodOut": r.get("checkOut") or "", "periodLate": 0, "periodEarly": 0})
+				continue
+			for slot in slots:
+				rows.append({**common, "periodName": slot.get("name") or "فترة", "periodIn": slot.get("in") or "",
+				             "periodOut": slot.get("out") or "", "periodLate": round2(slot.get("lateMinutes")),
+				             "periodEarly": round2(slot.get("earlyMinutes"))})
 
 	elif report_id == "raw_punches":
 		for rec in state.get("attendanceRecords") or []:
@@ -340,6 +456,11 @@ def run_report(state, report_id, filters=None, columns=None):
 					"overtimeAmount": round2(slip.get("overtimeAmount")), "absenceDeduction": round2(slip.get("absenceDeduction")),
 					"lateDeduction": round2(slip.get("lateDeduction")), "gosiEmployeeShare": round2(slip.get("gosiEmployeeShare")),
 				})
+				base["_allowances"] = {}
+				for item in slip.get("allowances") or []:
+					name = (item.get("name") or "").strip()
+					if name:
+						base["_allowances"][name] = round2(num(base["_allowances"].get(name)) + num(item.get("amount")))
 			rows.append(base)
 
 	elif report_id == "department_report":
@@ -430,9 +551,37 @@ def run_report(state, report_id, filters=None, columns=None):
 		wanted = [c for c in columns if isinstance(c, str)]
 		if wanted:
 			report_columns = [c for c in report_columns if c["key"] in wanted]
+	if report_id == "payslip_register":
+		names = [t.get("name") for t in sorted(state.get("allowanceTypes") or [], key=lambda t: t.get("name") or "") if t.get("name")]
+		for row in rows:
+			for name in (row.get("_allowances") or {}):
+				if name not in names:
+					names.append(name)
+		for row in rows:
+			values = row.pop("_allowances", None) or {}
+			for name in names:
+				row["alw:%s" % name] = round2(values.get(name, 0))
+		report_columns = insert_columns(report_columns, [{"key": "alw:%s" % n, "label": n, "type": "money"} for n in names], "totalAllowances")
+	if report_id in PERIOD_REPORTS:
+		rows = attach_shift_periods(state, rows, frm, to)
+		for row in rows:
+			row.update(period_values(row))
+		extra = []
+		if not any(c["key"] == "shiftName" for c in report_columns):
+			extra.append({"key": "shiftName", "label": "الدوام", "type": "text"})
+		extra.extend(period_columns(state, rows))
+		report_columns = insert_columns(report_columns, extra, "employeeName")
+	skip_total = {"lateMinutes"} if report_id == "employee_monthly_periods" else set()
+	totals = {}
+	for col in report_columns:
+		if col.get("type") in ("number", "money") and col["key"] not in skip_total:
+			total = sum(num(r.get(col["key"])) for r in rows)
+			if total:
+				totals[col["key"]] = round2(total)
 	catalog = next((r for r in REPORT_CATALOG if r["id"] == report_id), {})
 	return {
 		"id": report_id, "title": catalog.get("name", report_id), "category": catalog.get("category", ""),
 		"columns": report_columns, "rows": rows, "from": frm, "to": to, "count": len(rows),
+		"totals": totals,
 		"generatedAt": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
 	}

@@ -502,7 +502,11 @@ def attendance_daily(ctx):
 	preset = ROLE_PRESETS.get(ctx.user.get("role")) or {}
 	if preset.get("branchScoped") and ctx.user.get("branchId"):
 		rows = [r for r in rows if can_access_branch(ctx.user, r.get("branchId"))]
+	if q.get("shiftId"):
+		rows = [r for r in rows if r.get("shiftId") == q.get("shiftId")
+		        or ((engine.find_employee(ctx.state, r.get("empId")) or {}).get("shiftId") == q.get("shiftId"))]
 	rows.sort(key=lambda r: (r.get("date", ""), r.get("employeeName", "")))
+	rows = engine.attach_shift_periods(ctx.state, rows, frm, to)
 	return {"data": rows, "from": frm, "to": to}
 
 
@@ -1011,6 +1015,36 @@ def leave_adjust(ctx):
 
 
 # ═════════ الرواتب ═════════
+def _auto_post(ctx, event, ref_id, date, entries, description, ref_type="", ref_number="", branch_id=""):
+	"""ترحيل قيد محاسبي تلقائي دون إيقاف العملية المالية إذا فشل الترحيل."""
+	try:
+		return accounting.post_entry(ctx.state, event, ref_id, date, entries, description=description,
+		                             ref_type=ref_type, ref_number=ref_number,
+		                             user=ctx.user.get("name"), branch_id=branch_id,
+		                             currency=(ctx.state.get("settings") or {}).get("currency"))
+	except ValueError as exc:
+		engine.notify(ctx.state, {"key": "accounting-post:%s:%s" % (event, ref_id), "type": "accounts",
+		                          "severity": "warning", "title": "تعذّر الترحيل المحاسبي",
+		                          "message": str(exc)[:200], "link": "#/accounts"})
+		return None
+
+
+def _financial_collection_hook(ctx, name, payload):
+	"""ترحيل محاسبي للعمليات المالية التي تُسجَّل عبر واجهة المجموعات العامة."""
+	if name == "advancePayments":
+		amount = num(payload.get("amount"))
+		_auto_post(ctx, "advance_payment", payload.get("id"), payload.get("date") or today_iso(), [
+			("cash", amount, 0, "تحصيل سداد سلفة"),
+			("advances", 0, amount, "تخفيض رصيد سلفة موظف"),
+		], "سداد سلفة موظف", "advancePayments", "")
+	elif name == "loanPayments":
+		amount = num(payload.get("amount"))
+		_auto_post(ctx, "loan_payment", payload.get("id"), payload.get("paidDate") or payload.get("dueDate") or today_iso(), [
+			("cash", amount, 0, "تحصيل قسط قرض"),
+			("advances", 0, amount, "تخفيض رصيد قرض موظف"),
+		], "سداد قرض موظف", "loanPayments", "")
+
+
 @route("GET", r"/payroll/settings", permission=("payroll", "view"))
 def payroll_settings(ctx):
 	return {"data": ctx.state.get("payrollSettings"), "leavePolicy": ctx.state.get("leavePolicy")}
@@ -1171,6 +1205,10 @@ def payroll_approve_payslip(ctx, slip_id):
 	if not slip:
 		raise ApiError("الكشف غير موجود", 404)
 	slip.update({"status": "approved", "approvedBy": ctx.user.get("name"), "approvedAt": engine._now()})
+	_auto_post(ctx, "payslip_accrual", slip.get("id"), slip.get("toDate") or today_iso(),
+	           accounting.payslip_entries(slip),
+	           "استحقاق راتب %s — %s/%s" % (slip.get("employeeName"), slip.get("month"), slip.get("year")),
+	           "payslips", "%s/%s" % (slip.get("month"), slip.get("year")), slip.get("branchId") or "")
 	ctx.audit("approve", "payroll", "payslips", slip_id, "اعتماد كشف راتب")
 	_commit(ctx)
 	return {"data": slip, "message": "تم اعتماد الكشف"}
@@ -1206,6 +1244,14 @@ def payroll_pay_payslip(ctx, slip_id):
 			"totalCredit": round2(num(slip.get("gosiEmployeeShare")) + num(slip.get("netSalary"))),
 			"description": "سداد راتب %s — %s/%s" % (slip.get("employeeName"), slip.get("month"), slip.get("year")),
 			"createdBy": ctx.user.get("name"), "status": "posted", "createdAt": engine._now()})
+	_auto_post(ctx, "payslip_accrual", slip.get("id"), slip.get("toDate") or slip["paidDate"],
+	           accounting.payslip_entries(slip),
+	           "استحقاق راتب %s — %s/%s" % (slip.get("employeeName"), slip.get("month"), slip.get("year")),
+	           "payslips", "%s/%s" % (slip.get("month"), slip.get("year")), slip.get("branchId") or "")
+	_auto_post(ctx, "payslip_payment", slip.get("id"), slip["paidDate"],
+	           accounting.payslip_payment_entries(slip, slip["paymentMethod"]),
+	           "صرف راتب %s — %s/%s" % (slip.get("employeeName"), slip.get("month"), slip.get("year")),
+	           "payslips", "%s/%s" % (slip.get("month"), slip.get("year")), slip.get("branchId") or "")
 	engine.notify(s, {"key": "payslip-paid:%s" % slip["id"], "type": "payslip", "severity": "success",
 	                  "title": "صرف راتب", "message": "تم صرف صافي %s لـ %s" % (round2(num(slip.get("netSalary"))), slip.get("employeeName")),
 	                  "link": "#/payroll", "employeeId": slip.get("employeeId")})
@@ -1225,6 +1271,11 @@ def payroll_eos_create(ctx):
 	record = {"id": uid("eos_"), **settlement, "status": "calculated",
 	          "createdBy": ctx.user.get("name"), "createdAt": engine._now()}
 	ctx.state.setdefault("eosSettlements", []).append(record)
+	_auto_post(ctx, "eos_accrual", record["id"], record.get("endDate") or today_iso(), [
+		("eosExpense", num(record.get("total")), 0, "مكافأة نهاية خدمة — %s" % record.get("employeeName")),
+		("eosPayable", 0, num(record.get("total")), "مستحق نهاية خدمة — %s" % record.get("employeeName")),
+	], "استحقاق نهاية خدمة %s" % record.get("employeeName"), "eosSettlements", "",
+		(engine.find_employee(ctx.state, record.get("employeeId")) or {}).get("branchId") or "")
 	ctx.audit("eos", "payroll", "eosSettlements", record["id"], "تسوية نهاية خدمة %s" % settlement.get("employeeName"))
 	_commit(ctx)
 	return {"data": record, "message": "تم حساب تسوية نهاية الخدمة"}
@@ -1435,13 +1486,19 @@ def self_review_request(ctx, req_id):
 	                "reviewedAt": engine._now(), "reviewNote": str(body.get("note") or "")[:1000]})
 	if body["status"] == "approved" and request.get("type") == "advance":
 		emp = engine.find_employee(s, request.get("employeeId")) or {}
-		s.setdefault("advances", []).append({
+		advance = {
 			"id": uid("adv_"), "employeeId": request.get("employeeId"),
 			"employeeName": emp.get("name") or request.get("employeeName"),
 			"totalAmount": request.get("amount"), "remainingAmount": request.get("amount"),
 			"monthlyDeduction": request.get("monthlyDeduction") or round2(num(request.get("amount")) / 10.0),
 			"status": "active", "requestId": request["id"], "notes": request.get("details") or "",
-			"createdAt": engine._now(), "createdBy": ctx.user.get("name")})
+			"startDate": today_iso(),
+			"createdAt": engine._now(), "createdBy": ctx.user.get("name")}
+		s.setdefault("advances", []).append(advance)
+		_auto_post(ctx, "advance_disbursement", advance["id"], advance["startDate"], [
+			("advances", num(advance.get("totalAmount")), 0, "سلفة موظف — %s" % advance.get("employeeName")),
+			("bank", 0, num(advance.get("totalAmount")), "صرف سلفة — %s" % advance.get("employeeName")),
+		], "صرف سلفة %s" % advance.get("employeeName"), "advances", "", emp.get("branchId") or "")
 	engine.notify(s, {"key": "selfreq-%s:%s" % (body["status"], req_id), "type": "self_request",
 	                  "severity": "success" if body["status"] == "approved" else "warning",
 	                  "title": "اعتماد طلبك" if body["status"] == "approved" else "رفض طلبك",
@@ -1808,6 +1865,7 @@ def collection_create(ctx, name):
 	if isinstance(container, dict):
 		raise ApiError("لا يمكن الإضافة لهذه المجموعة")
 	container.append(payload)
+	_financial_collection_hook(ctx, name, payload)
 	ctx.audit("create", module, name, payload["id"], "إضافة سجل %s" % name)
 	_commit(ctx)
 	return {"data": payload, "message": "تمت الإضافة بنجاح"}
@@ -1994,7 +2052,7 @@ def _accounts_collection(ctx):
 	if not isinstance(rows, list) or not rows:
 		rows = accounting.default_accounts()
 		ctx.state["accounts"] = rows
-	return rows
+	return accounting.ensure_default_accounts(ctx.state)
 
 
 def _vouchers_collection(ctx):
@@ -2025,6 +2083,93 @@ def accounts_next_code(ctx):
 	except ValueError as exc:
 		raise ApiError(str(exc))
 	return {"data": {"code": code}}
+
+
+@route("GET", r"/accounts/mapping", permission=("accounts", "view"))
+def accounts_mapping(ctx):
+	_accounts_collection(ctx)
+	current = accounting.mapping(ctx.state)
+	rows = [{"key": key, "label": label, "code": current.get(key), "typeLabel": ""}
+	        for key, label in accounting.MAPPING_LABELS.items()]
+	return {"data": {"mapping": current, "rows": rows, "events": accounting.EVENT_LABELS}}
+
+
+@route("PUT", r"/accounts/mapping", permission=("accounts", "edit"))
+def accounts_mapping_save(ctx):
+	_accounts_collection(ctx)
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	payload = body.get("mapping") if isinstance(body.get("mapping"), dict) else body
+	index = {str(a.get("code")): a for a in accounting.accounts(ctx.state)}
+	for key in accounting.DEFAULT_MAPPING:
+		code = str(payload.get(key) or "").strip()
+		if not code:
+			continue
+		account = index.get(code)
+		if not account:
+			raise ApiError("كود الحساب غير موجود: %s" % code)
+		if account.get("isGroup"):
+			raise ApiError("اختر حسابًا فرعيًا لا رئيسيًا: %s" % account.get("name"))
+	saved = accounting.save_mapping(ctx.state, payload)
+	ctx.audit("update", "accounts", "settings", "accountingMapping", "تحديث الربط المحاسبي التلقائي")
+	_commit(ctx)
+	return {"data": saved, "message": "تم حفظ الربط المحاسبي"}
+
+
+@route("POST", r"/accounts/postings/sync", permission=("accounts", "add"))
+def accounts_postings_sync(ctx):
+	"""ترحيل القيود الناقصة لكل العمليات المالية السابقة (رواتب، نهاية خدمة، سلف)."""
+	s = ctx.state
+	_accounts_collection(ctx)
+	if not accounting.mapping(s).get("enabled", True):
+		raise ApiError("الترحيل التلقائي معطّل — فعّله من تبويب الربط المحاسبي أولًا")
+	created, skipped, failed = 0, 0, []
+	currency = (s.get("settings") or {}).get("currency") or ""
+
+	def attempt(event, ref_id, date, entries, description, ref_type="", ref_number="", branch_id=""):
+		nonlocal created, skipped
+		if not ref_id or accounting.has_posting(s, event, ref_id):
+			skipped += 1
+			return
+		try:
+			voucher = accounting.post_entry(s, event, ref_id, date, entries, description=description,
+			                                ref_type=ref_type, ref_number=ref_number,
+			                                user=ctx.user.get("name"), branch_id=branch_id, currency=currency)
+		except ValueError as exc:
+			failed.append(str(exc))
+			return
+		if voucher:
+			created += 1
+
+	for slip in s.get("payslips") or []:
+		if slip.get("status") not in ("approved", "paid"):
+			continue
+		attempt("payslip_accrual", slip.get("id"), slip.get("toDate") or slip.get("paidDate"),
+		        accounting.payslip_entries(slip),
+		        "استحقاق راتب %s — %s/%s" % (slip.get("employeeName"), slip.get("month"), slip.get("year")),
+		        "payslips", "%s/%s" % (slip.get("month"), slip.get("year")), slip.get("branchId") or "")
+		if slip.get("status") == "paid":
+			attempt("payslip_payment", slip.get("id"), slip.get("paidDate"),
+			        accounting.payslip_payment_entries(slip),
+			        "صرف راتب %s — %s/%s" % (slip.get("employeeName"), slip.get("month"), slip.get("year")),
+			        "payslips", "%s/%s" % (slip.get("month"), slip.get("year")), slip.get("branchId") or "")
+	for record in s.get("eosSettlements") or []:
+		total = num(record.get("total"))
+		attempt("eos_accrual", record.get("id"), record.get("endDate") or today_iso(), [
+			("eosExpense", total, 0, "مكافأة نهاية خدمة — %s" % record.get("employeeName")),
+			("eosPayable", 0, total, "مستحق نهاية خدمة — %s" % record.get("employeeName")),
+		], "استحقاق نهاية خدمة %s" % record.get("employeeName"), "eosSettlements", "")
+	for advance in s.get("advances") or []:
+		total = num(advance.get("totalAmount"))
+		attempt("advance_disbursement", advance.get("id"), advance.get("startDate") or today_iso(), [
+			("advances", total, 0, "سلفة موظف — %s" % advance.get("employeeName")),
+			("bank", 0, total, "صرف سلفة — %s" % advance.get("employeeName")),
+		], "صرف سلفة %s" % advance.get("employeeName"), "advances", "")
+	if created:
+		ctx.audit("post", "accounts", "vouchers", "sync", "ترحيل %s قيدًا تلقائيًا ناقصًا" % created)
+	_commit(ctx)
+	return {"data": {"created": created, "skipped": skipped, "failed": failed[:10]},
+	        "message": "تم ترحيل %s قيدًا (تم تجاهل %s قيد موجود)%s" % (created, skipped,
+	                                                         (" — تعذّر ترحيل %s" % len(failed)) if failed else "")}
 
 
 @route("POST", r"/accounts", permission=("accounts", "add"))

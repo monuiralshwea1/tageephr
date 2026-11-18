@@ -76,7 +76,7 @@ DEFAULT_SETTINGS = {
 	"gosiEmployeeRate": 11, "gosiEmployerRate": 11.75,
 	"socialInsuranceSalaryCap": 45000, "socialInsuranceSalaryFloor": 0,
 	"gracePeriodMinutes": 15, "earlyDepartureGraceMinutes": 15, "lateAbsenceMinutes": 0,
-	"themeColor": "#0d9488", "sidebarColor": "#0b1526",
+	"themeColor": "#0d9488", "sidebarColor": "#3F51B5",
 	"lateArrivalDeduction": 0, "earlyDepartureDeduction": 0, "absentDeductionDays": 1,
 	"taxRate": 0, "taxExemptLimit": 0, "taxCalcMethod": "net",
 	"printerPaperSize": "A4", "printHeaderImage": "",

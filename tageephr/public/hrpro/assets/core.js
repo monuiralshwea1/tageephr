@@ -266,6 +266,7 @@
         }
         backdrop.close = close;
         if (onOpen) onOpen(backdrop.querySelector('.modal'), close, backdrop);
+        App.enhanceSelects(backdrop);
         return backdrop;
     };
 
@@ -528,6 +529,146 @@
         deductions: () => (App.state.data.deductionTypes || []).map(d => ({ value: d.id, label: d.name }))
     };
 
+    // ───────────── أعمدة فترات الدوام ─────────────
+    App.periodColumns = rows => {
+        const groups = [];
+        (rows || []).forEach(row => {
+            if (!row.shiftId) return;
+            let group = groups.find(g => g.shiftId === row.shiftId);
+            if (!group) {
+                group = { shiftId: row.shiftId, name: row.shiftName || App.shiftName(row.shiftId), periods: row.shiftPeriods || [], index: groups.length };
+                groups.push(group);
+            }
+        });
+        const few = groups.length <= 3;
+        return groups.filter(g => few || g.periods.length > 1).flatMap(group =>
+            group.periods.map((slot, index) => ({
+                key: `period_${group.index}_${index}`,
+                label: `${slot.name || 'فترة'} — ${group.name}`,
+                render: row => {
+                    if (row.shiftId !== group.shiftId) return '<span class="muted">—</span>';
+                    const period = (row.shiftPeriods || [])[index];
+                    if (!period || (!period.in && !period.out)) return '<span class="muted">—</span>';
+                    const extra = period.lateMinutes ? ` <span class="badge warning">تأخير ${period.lateMinutes}</span>`
+                        : period.earlyMinutes ? ` <span class="badge info">مبكر ${period.earlyMinutes}</span>` : '';
+                    return `<span dir="ltr" class="raw">${escapeHtml(period.in || '—')} — ${escapeHtml(period.out || '—')}</span>${extra}`;
+                }
+            }))
+        );
+    };
+
+    // ───────────── قوائم منسدلة قابلة للبحث ─────────────
+    let searchSelect = null;
+    const closeSearchSelect = () => {
+        if (!searchSelect) return;
+        searchSelect.pop.remove();
+        searchSelect.trigger.classList.remove('ss-open');
+        searchSelect = null;
+    };
+    document.addEventListener('click', e => {
+        if (searchSelect && !e.target.closest('.ss-pop') && !e.target.closest('.ss-trigger')) closeSearchSelect();
+    });
+
+    function openSearchSelect(inst) {
+        if (searchSelect && searchSelect.select === inst.select) { closeSearchSelect(); return; }
+        closeSearchSelect();
+        const rect = inst.trigger.getBoundingClientRect();
+        const width = Math.max(rect.width, 200);
+        const pop = document.createElement('div');
+        pop.className = 'ss-pop';
+        pop.style.width = width + 'px';
+        pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
+        pop.innerHTML = `<div class="ss-pop-head"><input type="text" class="ss-input" placeholder="ابحث في القائمة..." autocomplete="off"></div><div class="ss-list"></div>`;
+        document.body.appendChild(pop);
+        if (window.innerHeight - rect.bottom < 240 && rect.top > 260) pop.style.top = Math.max(8, rect.top - Math.min(320, rect.top - 8) - 4) + 'px';
+        else pop.style.top = (rect.bottom + 4) + 'px';
+
+        const items = Array.from(inst.select.options).map(option => {
+            const group = option.parentElement && option.parentElement.tagName === 'OPTGROUP' ? option.parentElement.label : '';
+            return { option, text: group ? `${group} — ${option.textContent}` : option.textContent };
+        });
+        const input = pop.querySelector('.ss-input');
+        const list = pop.querySelector('.ss-list');
+        let filtered = items;
+        let active = Math.max(0, inst.select.selectedIndex);
+
+        const pick = item => {
+            if (!item) return;
+            const option = item.option || item;
+            const index = Array.prototype.indexOf.call(inst.select.options, option);
+            if (index >= 0) inst.select.selectedIndex = index;
+            else inst.select.value = option.value;
+            inst.sync();
+            inst.select.dispatchEvent(new Event('change', { bubbles: true }));
+            closeSearchSelect();
+        };
+        const paint = () => {
+            const q = input.value.trim().toLowerCase();
+            filtered = items.filter(item => !q || item.text.toLowerCase().includes(q));
+            if (!filtered.length) {
+                list.innerHTML = '<div class="ss-none">لا توجد نتائج مطابقة</div>';
+                return;
+            }
+            active = Math.max(0, Math.min(active, filtered.length - 1));
+            list.innerHTML = filtered.map((item, i) => `<button type="button" class="ss-option ${i === active ? 'active' : ''} ${item.option.selected ? 'selected' : ''}" data-index="${i}">${escapeHtml(item.text)}</button>`).join('');
+            list.querySelectorAll('.ss-option').forEach(btn => {
+                btn.onmousedown = e => { e.preventDefault(); pick(filtered[parseInt(btn.dataset.index, 10)]); };
+            });
+        };
+        input.addEventListener('input', () => { active = 0; paint(); });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); active += 1; paint(); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); active -= 1; paint(); }
+            else if (e.key === 'Enter') { e.preventDefault(); pick(filtered[active]); }
+            else if (e.key === 'Escape') { e.preventDefault(); closeSearchSelect(); }
+        });
+        paint();
+        inst.trigger.classList.add('ss-open');
+        searchSelect = { ...inst, pop };
+        setTimeout(() => input.focus(), 0);
+    }
+
+    function enhanceSelect(select) {
+        if (!select || select.dataset.ssReady === '1' || select.multiple || select.dataset.nosearch === '1') return;
+        if (!select.parentNode) return;
+        select.dataset.ssReady = '1';
+        const wrap = document.createElement('div');
+        wrap.className = 'ss' + (select.classList.contains('w-full') ? ' w-full' : '');
+        select.parentNode.insertBefore(wrap, select);
+        wrap.appendChild(select);
+        select.classList.add('ss-native');
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'ss-trigger';
+        trigger.innerHTML = `<span class="ss-label"></span><svg class="ss-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+        wrap.appendChild(trigger);
+        const label = trigger.querySelector('.ss-label');
+        const nativeValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+        const inst = { select, trigger, pop: null, sync: null };
+        inst.sync = () => {
+            const option = select.options[select.selectedIndex];
+            label.textContent = option ? option.textContent : '';
+            trigger.classList.toggle('ss-empty', !String(select.value || ''));
+            trigger.disabled = !!select.disabled;
+        };
+        try {
+            Object.defineProperty(select, 'value', {
+                configurable: true,
+                get() { return nativeValue.get.call(select); },
+                set(value) { nativeValue.set.call(select, value); inst.sync(); }
+            });
+        } catch (_) { /* لا شيء */ }
+        select.addEventListener('change', inst.sync);
+        trigger.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openSearchSelect(inst); });
+        inst.sync();
+    }
+
+    App.enhanceSelects = root => {
+        const scope = root && root.querySelectorAll ? root : document;
+        scope.querySelectorAll('select').forEach(enhanceSelect);
+        if (scope.tagName === 'SELECT') enhanceSelect(scope);
+    };
+
     App.can = (module, action = 'view') => {
         const user = App.state.user;
         if (!user) return false;
@@ -622,7 +763,10 @@
             const brandRgb = hexToRgb(s.themeColor);
             if (brandRgb) root.style.setProperty('--brand-dark', mixColor(brandRgb, 0, 0.18));
         }
-        const sidebar = s.sidebarColor || '#0b1526';
+        const SIDEBAR_DEFAULT = '#3F51B5';
+        const savedSidebar = String(s.sidebarColor || '').trim();
+        // اللون القديم (#0b1526) كان الافتراضي؛ يُستبدل بالافتراضي الجديد تلقائيًا
+        const sidebar = (!savedSidebar || savedSidebar.toLowerCase() === '#0b1526') ? SIDEBAR_DEFAULT : savedSidebar;
         root.style.setProperty('--sidebar-bg', sidebar);
         const rgb = hexToRgb(sidebar) || { r: 11, g: 21, b: 38 };
         // قائمة فاتحة نحتاج نصًا غامقًا، وقائمة غامقة نحتاج نصًا فاتحًا
@@ -634,8 +778,10 @@
         root.style.setProperty('--sidebar-fg-dim', `rgba(${ink}, .58)`);
         root.style.setProperty('--sidebar-line', lightSidebar ? 'rgba(11, 21, 38, .14)' : 'rgba(255, 255, 255, .09)');
         root.style.setProperty('--sidebar-hover', lightSidebar ? 'rgba(11, 21, 38, .07)' : 'rgba(255, 255, 255, .08)');
-        root.style.setProperty('--sidebar-bg-2', mixColor(rgb, lightSidebar ? 255 : 0, lightSidebar ? 0.12 : 0.22));
-        root.style.setProperty('--sidebar-bg-3', mixColor(rgb, lightSidebar ? 255 : 0, lightSidebar ? 0.22 : 0.38));
+        // لون القائمة موحّد (بدون تدرّج) كما هو مطلوب
+        root.style.setProperty('--sidebar-bg-2', sidebar);
+        root.style.setProperty('--sidebar-bg-3', sidebar);
+        root.style.setProperty('--sidebar-accent', mixColor(rgb, 0, lightSidebar ? 0.35 : 0.28));
     };
 
     App.navigate = hash => {
@@ -667,6 +813,7 @@
         view.innerHTML = `<div class="empty"><div class="spinner" style="border-color:var(--line);border-top-color:var(--brand)"></div></div>`;
         try {
             await module.render(view, { params: rest, route });
+            App.enhanceSelects(view);
         } catch (err) {
             view.innerHTML = `<div class="alert danger">${App.icon('alert')}<div>${escapeHtml(err.message)}</div></div>`;
         }
@@ -1167,6 +1314,19 @@
             if (e.key === 'Escape' && App.modalStack.length) App.closeModal();
         });
         window.addEventListener('hashchange', App.route);
+        // تحويل كل القوائم المنسدلة إلى قوائم قابلة للبحث حتى مع إعادة الرسم الديناميكي
+        let ssTimer = null;
+        new MutationObserver(mutations => {
+            const added = mutations.some(m => Array.from(m.addedNodes).some(n => n.nodeType === 1 && (n.tagName === 'SELECT' || (n.querySelector && n.querySelector('select')))));
+            if (!added) return;
+            clearTimeout(ssTimer);
+            ssTimer = setTimeout(() => App.enhanceSelects(document), 40);
+        }).observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('resize', () => closeSearchSelect());
+        window.addEventListener('scroll', e => {
+            if (e.target && e.target.closest && e.target.closest('.ss-pop')) return;
+            if (searchSelect) closeSearchSelect();
+        }, true);
         App.start();
     });
 })();
