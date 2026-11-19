@@ -24,6 +24,8 @@ SERVER_ONLY = {"auditLog"}
 
 COLLECTION_MODULE = {
 	"employees": "employees", "employeeDocuments": "employees", "contracts": "employees",
+	"employeeTransfers": "employees", "employeePromotions": "employees",
+	"fingerprintCommands": "attendance",
 	"branches": "organization", "departments": "organization", "jobGrades": "organization",
 	"workShifts": "organization", "holidays": "organization", "documentTypes": "organization",
 	"attendanceRecords": "attendance", "attendanceDaily": "attendance", "attendanceCorrections": "attendance",
@@ -464,6 +466,10 @@ def employee_profile(ctx, emp_id):
 		"allowances": [a for a in s.get("employeeAllowances") or [] if a.get("employeeId") == emp["id"]],
 		"deductions": [d for d in s.get("employeeDeductions") or [] if d.get("employeeId") == emp["id"]],
 		"incentives": [i for i in s.get("incentives") or [] if i.get("employeeId") == emp["id"]],
+		"transfers": sorted([t for t in s.get("employeeTransfers") or [] if t.get("employeeId") == emp["id"]],
+		                    key=lambda t: t.get("createdAt") or "", reverse=True)[:20],
+		"promotions": sorted([p for p in s.get("employeePromotions") or [] if p.get("employeeId") == emp["id"]],
+		                     key=lambda p: p.get("createdAt") or "", reverse=True)[:20],
 	}
 
 
@@ -472,6 +478,219 @@ def employee_next_number(ctx):
 	numbers = [int(e["employeeNumber"]) for e in ctx.state.get("employees") or []
 	           if str(e.get("employeeNumber") or "").isdigit()]
 	return {"next": str((max(numbers) + 1) if numbers else 1).zfill(4)}
+
+
+# ═════════ نقل الموظفين والترقيات ═════════
+TRANSFER_FIELDS = ("branchId", "departmentId", "jobTitle", "jobGradeId", "shiftId", "managerId")
+PROMOTION_TYPES = {
+	"promotion": "ترقية", "salary": "زيادة راتب", "allowance": "زيادة بدل",
+	"grade": "تغيير رتبة", "position": "تغيير مسمى وظيفي", "mixed": "ترقية وزيادة",
+}
+
+
+def _branch_label(state, branch_id):
+	return next((b.get("name") for b in state.get("branches") or [] if b.get("id") == branch_id), "") or ""
+
+
+def _dept_label(state, dept_id):
+	return next((d.get("name") for d in state.get("departments") or [] if d.get("id") == dept_id), "") or ""
+
+
+def _active_branch(state, branch_id):
+	return next((b for b in state.get("branches") or []
+	             if b.get("id") == branch_id and b.get("active") is not False), None)
+
+
+def _flag(value, default=True):
+	if value is None:
+		return default
+	if isinstance(value, str):
+		return value.strip().lower() not in ("", "0", "false", "no", "off")
+	return bool(value)
+
+
+def _queue_fingerprint_enroll(state, emp, branch_id, transfer_id=""):
+	"""يضع أمر إضافة رقم بصمة الموظف في طابور أوامر جهاز الفرع الجديد.
+
+	وسيط البصمة في الفرع يسحب الأوامر تلقائيًا من /fingerprint/commands ثم ينفذها
+	على جهاز ذلك الفرع ويؤكدها عبر /fingerprint/commands/<id>/ack.
+	"""
+	pin = str(emp.get("fingerprintId") or emp.get("employeeNumber") or "").strip()
+	if not pin:
+		return {"status": "no_pin", "message": "لا يوجد رقم بصمة أو رقم وظيفي للموظف"}
+	devices = [d for d in state.get("fingerprintDevices") or [] if d.get("branchId") == branch_id]
+	device = devices[0] if devices else {}
+	command = {
+		"id": uid("fc_"), "action": "enroll_fingerprint", "branchId": branch_id,
+		"deviceId": device.get("sn") or device.get("deviceIp") or device.get("id") or "",
+		"pin": pin, "name": emp.get("name") or "", "employeeId": emp.get("id") or "",
+		"employeeName": emp.get("name") or "", "employeeNumber": emp.get("employeeNumber") or "",
+		"fingerprintId": emp.get("fingerprintId") or "", "transferId": transfer_id,
+		"status": "pending", "attempts": 0, "message": "", "createdAt": engine._now(),
+	}
+	state.setdefault("fingerprintCommands", []).append(command)
+	return {"status": "queued", "commandId": command["id"], "pin": pin, "deviceId": command["deviceId"],
+	        "message": "تمت جدولة إضافة رقم البصمة %s إلى جهاز فرع %s" % (pin, _branch_label(state, branch_id))}
+
+
+@route("POST", r"/employees/(?P<emp_id>[^/]+)/transfer", permission=("employees", "edit"))
+def employee_transfer(ctx, emp_id):
+	s = ctx.state
+	emp = engine.find_employee(s, emp_id)
+	if not emp:
+		raise ApiError("الموظف غير موجود", 404)
+	ctx.scope_branch(emp.get("branchId"))
+	if emp.get("status") == "terminated":
+		raise ApiError("لا يمكن نقل موظف منتهي الخدمة")
+	body = ctx.body
+	target = str(body.get("branchId") or "").strip()
+	if not target:
+		raise ApiError("الفرع الجديد مطلوب")
+	if not _active_branch(s, target):
+		raise ApiError("الفرع الجديد غير موجود أو غير نشط")
+	if target == emp.get("branchId"):
+		raise ApiError("الموظف موجود بالفعل في هذا الفرع")
+	ctx.scope_branch(target)
+
+	before = {key: emp.get(key) or "" for key in TRANSFER_FIELDS}
+	emp["branchId"] = target
+	for key in TRANSFER_FIELDS[1:]:
+		value = body.get(key)
+		if value not in (None, ""):
+			emp[key] = value
+	emp["branchChangedAt"] = engine._now()
+
+	effective = date_only(body.get("effectiveDate") or today_iso())
+	transfer = {
+		"id": uid("tr_"), "employeeId": emp["id"], "employeeName": emp.get("name") or "",
+		"employeeNumber": emp.get("employeeNumber") or "",
+		"branchId": target,
+		"fromBranchId": before["branchId"], "fromBranchName": _branch_label(s, before["branchId"]),
+		"toBranchId": target, "toBranchName": _branch_label(s, target),
+		"fromDepartmentId": before["departmentId"], "fromDepartmentName": _dept_label(s, before["departmentId"]),
+		"toDepartmentId": emp.get("departmentId") or "", "toDepartmentName": _dept_label(s, emp.get("departmentId")),
+		"fromJobTitle": before["jobTitle"], "toJobTitle": emp.get("jobTitle") or "",
+		"fromShiftId": before["shiftId"], "toShiftId": emp.get("shiftId") or "",
+		"fromManagerId": before["managerId"], "toManagerId": emp.get("managerId") or "",
+		"effectiveDate": effective, "reason": body.get("reason") or "", "notes": body.get("notes") or "",
+		"status": "applied", "fingerprint": {"status": "disabled", "message": "لم تُطلب مزامنة البصمة"},
+		"createdAt": engine._now(), "createdBy": ctx.user.get("name") or "",
+	}
+	s.setdefault("employeeTransfers", []).append(transfer)
+
+	if _flag(body.get("syncFingerprint"), True):
+		transfer["fingerprint"] = _queue_fingerprint_enroll(s, emp, target, transfer["id"])
+
+	engine.add_audit(s, {
+		"userId": ctx.user.get("id"), "userName": ctx.user.get("name"), "action": "employee_transfer",
+		"module": "employees", "collection": "employees", "recordId": emp["id"],
+		"details": "نقل %s من %s إلى %s" % (emp.get("name"), transfer["fromBranchName"], transfer["toBranchName"]),
+		"ip": getattr(frappe.local, "request", None) and frappe.local.request.remote_addr or "",
+	})
+	engine.notify(s, {
+		"key": "transfer:%s" % transfer["id"], "type": "employee_transfer", "severity": "info",
+		"title": "نقل موظف",
+		"message": "%s نُقل من %s إلى %s" % (emp.get("name"), transfer["fromBranchName"] or "—", transfer["toBranchName"]),
+		"link": "/employees/%s" % emp["id"],
+	})
+	_commit(ctx)
+	fp = transfer.get("fingerprint") or {}
+	message = "تم نقل %s إلى %s" % (emp.get("name"), transfer["toBranchName"])
+	if fp.get("status") == "queued":
+		message += " — %s" % fp.get("message")
+	elif fp.get("status") == "no_pin":
+		message += " — %s" % fp.get("message")
+	return {"data": transfer, "message": message}
+
+
+@route("GET", r"/employees/(?P<emp_id>[^/]+)/transfers", permission=("employees", "view"))
+def employee_transfers(ctx, emp_id):
+	rows = [t for t in ctx.state.get("employeeTransfers") or [] if t.get("employeeId") == emp_id]
+	rows.sort(key=lambda t: t.get("createdAt") or "", reverse=True)
+	return {"data": rows}
+
+
+@route("POST", r"/employees/(?P<emp_id>[^/]+)/promotion", permission=("employees", "edit"))
+def employee_promotion(ctx, emp_id):
+	s = ctx.state
+	emp = engine.find_employee(s, emp_id)
+	if not emp:
+		raise ApiError("الموظف غير موجود", 404)
+	ctx.scope_branch(emp.get("branchId"))
+	if emp.get("status") == "terminated":
+		raise ApiError("لا يمكن ترقية موظف منتهي الخدمة")
+	body = ctx.body
+	kind = str(body.get("type") or "promotion")
+	if kind not in PROMOTION_TYPES:
+		raise ApiError("نوع الترقية غير معروف")
+	old = {
+		"jobTitle": emp.get("jobTitle") or "", "jobGradeId": emp.get("jobGradeId") or "",
+		"baseSalary": num(emp.get("baseSalary")), "shiftId": emp.get("shiftId") or "",
+		"departmentId": emp.get("departmentId") or "",
+	}
+	changes = {}
+	if body.get("newJobTitle"):
+		changes["jobTitle"] = str(body["newJobTitle"]).strip()
+	if body.get("newJobGradeId"):
+		changes["jobGradeId"] = body["newJobGradeId"]
+	if body.get("newShiftId"):
+		changes["shiftId"] = body["newShiftId"]
+	if body.get("newDepartmentId"):
+		changes["departmentId"] = body["newDepartmentId"]
+	new_salary = None
+	if body.get("newBaseSalary") not in (None, ""):
+		new_salary = round2(num(body["newBaseSalary"]))
+		if new_salary <= 0:
+			raise ApiError("الراتب الجديد يجب أن يكون أكبر من صفر")
+		if new_salary == num(emp.get("baseSalary")):
+			raise ApiError("الراتب الجديد مطابق للراتب الحالي")
+		changes["baseSalary"] = new_salary
+		# تحديث أجر التأمينات إن كان مربوطًا بالراتب الأساسي
+		if emp.get("gosiBase") not in (None, ""):
+			changes["gosiBase"] = new_salary
+	if not changes:
+		raise ApiError("حدّد تغييرًا واحدًا على الأقل: مسمى وظيفي أو رتبة أو راتب أو دوام أو قسم")
+
+	for key, value in changes.items():
+		emp[key] = value
+	effective = date_only(body.get("effectiveDate") or today_iso())
+	record = {
+		"id": uid("pr_"), "employeeId": emp["id"], "employeeName": emp.get("name") or "",
+		"employeeNumber": emp.get("employeeNumber") or "", "branchId": emp.get("branchId") or "",
+		"type": kind, "typeLabel": PROMOTION_TYPES.get(kind, kind),
+		"oldJobTitle": old["jobTitle"], "newJobTitle": emp.get("jobTitle") or "",
+		"oldJobGradeId": old["jobGradeId"], "newJobGradeId": emp.get("jobGradeId") or "",
+		"oldBaseSalary": old["baseSalary"], "newBaseSalary": num(emp.get("baseSalary")),
+		"salaryIncrease": round2(num(emp.get("baseSalary")) - old["baseSalary"]),
+		"oldShiftId": old["shiftId"], "newShiftId": emp.get("shiftId") or "",
+		"oldDepartmentId": old["departmentId"], "newDepartmentId": emp.get("departmentId") or "",
+		"effectiveDate": effective, "reason": body.get("reason") or "", "notes": body.get("notes") or "",
+		"status": "applied", "createdAt": engine._now(), "createdBy": ctx.user.get("name") or "",
+	}
+	s.setdefault("employeePromotions", []).append(record)
+	engine.add_audit(s, {
+		"userId": ctx.user.get("id"), "userName": ctx.user.get("name"), "action": "employee_promotion",
+		"module": "employees", "collection": "employees", "recordId": emp["id"],
+		"details": "%s: %s" % (PROMOTION_TYPES.get(kind, kind), emp.get("name")),
+		"ip": getattr(frappe.local, "request", None) and frappe.local.request.remote_addr or "",
+	})
+	engine.notify(s, {
+		"key": "promotion:%s" % record["id"], "type": "employee_promotion", "severity": "info",
+		"title": PROMOTION_TYPES.get(kind, "ترقية"),
+		"message": "%s — %s" % (emp.get("name"),
+		                        "الراتب من %s إلى %s" % (num(old["baseSalary"]), num(emp.get("baseSalary")))
+		                        if record["salaryIncrease"] else (emp.get("jobTitle") or PROMOTION_TYPES.get(kind, ""))),
+		"link": "/employees/%s" % emp["id"],
+	})
+	_commit(ctx)
+	return {"data": record, "message": "تم تسجيل %s لـ %s" % (PROMOTION_TYPES.get(kind, "التغيير"), emp.get("name"))}
+
+
+@route("GET", r"/employees/(?P<emp_id>[^/]+)/promotions", permission=("employees", "view"))
+def employee_promotions(ctx, emp_id):
+	rows = [p for p in ctx.state.get("employeePromotions") or [] if p.get("employeeId") == emp_id]
+	rows.sort(key=lambda p: p.get("createdAt") or "", reverse=True)
+	return {"data": rows}
 
 
 # ═════════ الحضور ═════════
@@ -644,12 +863,40 @@ def fingerprint_punches(ctx):
 	added = skipped = 0
 	unknown = []
 	dates = set()
+
+	# فهارس جاهزة مرة واحدة بدل مسح كل الموظفين وكل السجلات لكل بصمة
+	# (هذا المسح كان سبب بطء/تعليق رفع أرشيف آلاف البصمات)
+	emp_by_key = {}
+	employees = s.get("employees") or []
+	for emp in employees:
+		for key in (emp.get("id"), emp.get("employeeNumber"), emp.get("username")):
+			key = str(key or "").strip()
+			if key and key not in emp_by_key:
+				emp_by_key[key] = emp
+	for emp in employees:
+		for key in (emp.get("fingerprintId"), emp.get("nationalId")):
+			key = str(key or "").strip()
+			if key and key not in emp_by_key:
+				emp_by_key[key] = emp
+
+	existing = set()
+	for a in s.get("attendanceRecords") or []:
+		emp_id = a.get("empId") or a.get("employeeId")
+		day = date_only(a.get("date"))
+		if not emp_id or not day:
+			continue
+		for field in ("punchTime", "checkIn", "checkOut"):
+			value = a.get(field)
+			if value:
+				existing.add("%s|%s|%s" % (emp_id, day, str(value)[:5]))
+
+	records = s.setdefault("attendanceRecords", [])
 	for p in punches:
 		number = str(p.get("employeeNumber") or p.get("employeeId") or p.get("empId") or p.get("pin") or p.get("userId") or "").strip()
 		if not number:
 			skipped += 1
 			continue
-		emp = engine.find_employee(s, number) or next((e for e in s.get("employees") or [] if str(e.get("fingerprintId") or "") == number), None)
+		emp = emp_by_key.get(number)
 		if not emp:
 			unknown.append(number)
 			skipped += 1
@@ -664,14 +911,12 @@ def fingerprint_punches(ctx):
 		if not day or not time_text:
 			skipped += 1
 			continue
-		exists = any((a.get("empId") == emp["id"] or a.get("employeeId") == emp["id"]) and date_only(a.get("date")) == day
-		             and (a.get("punchTime") == time_text or a.get("checkIn") == time_text or a.get("checkOut") == time_text)
-		             for a in s.get("attendanceRecords") or [])
-		if exists:
+		key = "%s|%s|%s" % (emp["id"], day, str(time_text)[:5])
+		if key in existing:
 			skipped += 1
 			continue
 		punch_type = p.get("punchType")
-		s.setdefault("attendanceRecords", []).append({
+		records.append({
 			"id": uid("att_"), "empId": emp["id"], "employeeId": emp["id"],
 			"employeeName": emp.get("name") or "", "employeeNumber": emp.get("employeeNumber") or "",
 			"date": day, "punchTime": time_text, "punchType": "" if punch_type is None else punch_type,
@@ -679,6 +924,7 @@ def fingerprint_punches(ctx):
 			"branchId": branch_id or emp.get("branchId") or "", "deviceId": device_id,
 			"source": "fingerprint", "createdAt": engine._now(),
 		})
+		existing.add(key)
 		dates.add(day)
 		added += 1
 	if dates:
@@ -856,6 +1102,71 @@ def fingerprint_assign(ctx):
 	return {"ok": True, "message": "تم إسناد رقم البصمة للموظف" if fingerprint_id else "تم إلغاء ربط البصمة",
 	        "employee": {"id": emp["id"], "name": emp.get("name"), "employeeNumber": emp.get("employeeNumber") or "",
 	                     "fingerprintId": emp.get("fingerprintId")}}
+
+
+@route("POST", r"/fingerprint/commands", auth=False)
+def fingerprint_commands(ctx):
+	"""يسحب وسيط البصمة أوامر الأجهزة (مثل إضافة رقم بصمة موظف منقول)."""
+	if not _device_key_ok(ctx):
+		raise ApiError("مفتاح جهاز البصمة غير صالح", 401)
+	s = ctx.state
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	branch_id = str(body.get("branchId") or ctx.query.get("branchId") or "").strip()
+	device_id = str(body.get("deviceId") or ctx.query.get("deviceId") or "").strip()
+	pending = []
+	for cmd in s.setdefault("fingerprintCommands", []):
+		if cmd.get("status") != "pending":
+			continue
+		if branch_id and cmd.get("branchId") != branch_id:
+			continue
+		if not branch_id and device_id and cmd.get("deviceId") != device_id:
+			continue
+		pending.append(cmd)
+	pending = pending[:20]
+	for cmd in pending:
+		cmd["status"] = "sent"
+		cmd["sentAt"] = engine._now()
+		cmd["attempts"] = num(cmd.get("attempts")) + 1
+	if pending:
+		_commit(ctx)
+	return {"ok": True, "data": [{
+		"id": c.get("id"), "action": c.get("action"), "pin": c.get("pin"),
+		"name": c.get("name") or "", "employeeNumber": c.get("employeeNumber") or "",
+		"employeeId": c.get("employeeId") or "", "branchId": c.get("branchId") or "",
+		"deviceId": c.get("deviceId") or "",
+	} for c in pending]}
+
+
+@route("POST", r"/fingerprint/commands/(?P<command_id>[^/]+)/ack", auth=False)
+def fingerprint_command_ack(ctx, command_id):
+	"""يؤكد وسيط البصمة نتيجة تنفيذ الأمر على الجهاز."""
+	if not _device_key_ok(ctx):
+		raise ApiError("مفتاح جهاز البصمة غير صالح", 401)
+	s = ctx.state
+	command = next((c for c in s.get("fingerprintCommands") or [] if c.get("id") == command_id), None)
+	if not command:
+		raise ApiError("الأمر غير موجود", 404)
+	ok = _flag(ctx.body.get("ok"), False)
+	message = str(ctx.body.get("message") or "")[:300]
+	command["message"] = message
+	command["attempts"] = num(command.get("attempts"))
+	if ok:
+		command["status"] = "done"
+		command["finishedAt"] = engine._now()
+	elif command["attempts"] >= 5:
+		command["status"] = "failed"
+		command["finishedAt"] = engine._now()
+	else:
+		command["status"] = "pending"
+	if command.get("transferId"):
+		transfer = next((t for t in s.get("employeeTransfers") or [] if t.get("id") == command["transferId"]), None)
+		if transfer:
+			fp = transfer.setdefault("fingerprint", {})
+			fp["status"] = "synced" if ok else ("failed" if command["status"] == "failed" else "queued")
+			fp["message"] = message or ("تمت إضافة رقم البصمة إلى جهاز الفرع" if ok else "في انتظار تنفيذ الوسيط")
+			fp["syncedAt"] = command.get("finishedAt") or ""
+	_commit(ctx)
+	return {"ok": True, "status": command["status"], "message": command["message"]}
 
 
 @route("POST", r"/fingerprint/push", auth=False)
@@ -1827,6 +2138,8 @@ def collection_list(ctx, name):
 	preset = ROLE_PRESETS.get(ctx.user.get("role")) or {}
 	if name == "employees" and preset.get("branchScoped") and ctx.user.get("branchId"):
 		rows = [r for r in rows if r.get("branchId") == ctx.user.get("branchId")]
+	if name in ("employeeTransfers", "employeePromotions") and preset.get("branchScoped") and ctx.user.get("branchId"):
+		rows = [r for r in rows if ctx.user.get("branchId") in (r.get("branchId"), r.get("toBranchId"))]
 	for key, value in ctx.query.items():
 		if key in ("search", "q", "limit", "sort", "order", "path"):
 			continue

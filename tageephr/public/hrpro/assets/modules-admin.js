@@ -1257,9 +1257,12 @@
                     <div class="field full"><label>العنوان</label><input id="s_address" value="${h(s.address || '')}"></div>
                     ${A.imageField({ key: 'logo', label: 'شعار الشركة', value: s.logo || '', maxWidth: 480, help: 'ارفع شعار الشركة من ملفات الجهاز أو ألصق رابط الصورة — يظهر في القائمة الجانبية وفي رأس المطبوعات.' })}
                     <div class="form-section full"><h4>${A.icon('print')} رأس الطباعة وخط المطبوعات</h4></div>
-                    ${A.imageField({ key: 'printHeaderImage', label: 'صورة رأس صفحة الطباعة', value: s.printHeaderImage || '', maxWidth: 1600, wide: true, help: 'صورة عريضة (المقاس المقترح 1600×220) تظهر أعلى كل صفحة مطبوعة بعرض الصفحة كامل، ويمكن أن تتضمن الشعار واسم الشركة وبيانات التواصل.' })}
+                    ${A.imageField({ key: 'printHeaderImage', label: 'صورة رأس صفحة الطباعة', value: s.printHeaderImage || '', maxWidth: 1600, wide: true, help: 'صورة عريضة (المقاس المقترح 1600×220) تظهر في أعلى الصفحة المطبوعة بعرض الصفحة كامل، ويمكن أن تتضمن الشعار واسم الشركة وبيانات التواصل.' })}
+                    <div class="field"><label>ارتفاع صورة رأس الطباعة (px)</label><input type="number" min="40" max="400" step="1" id="s_printHeaderHeight" value="${s.printHeaderHeight || 170}"><div class="help">ارتفاع الصورة في الطباعة بالبكسل — الافتراضي 170. يظهر تحتها خط فاصل بعرض الصفحة ثم اسم التقرير والفلاتر.</div></div>
                     <div class="field"><label>نوع خط الطباعة</label><select id="s_printFontFamily">${A.printFontOptionsHtml(s.printFontFamily || A.PRINT_FONTS[0].value)}</select><div class="help">يُطبّق على كل التقارير والكشوف المطبوعة.</div></div>
                     <div class="field"><label>حجم خط الطباعة (px)</label><input type="number" min="7" max="24" step="1" id="s_printFontSize" value="${s.printFontSize || 12}"><div class="help">من 7 إلى 24 — الافتراضي 12.</div></div>
+                    <div class="field"><label>اسم مدير الموارد البشرية (في توقيع المطبوعات)</label><input id="s_printHrManagerName" value="${h(s.printHrManagerName || '')}" placeholder="اتركه فارغًا لترك خط التوقيع فقط"></div>
+                    <div class="field"><label>اسم المدير العام / نائب المدير العام</label><input id="s_printDirectorName" value="${h(s.printDirectorName || '')}" placeholder="يظهر تحت خط التوقيع في أسفل كل صفحة مطبوعة"><div class="help">يُطبع تحت الجدول في كل صفحة، ويُكتب أسفله اسم المستخدم الذي طبع المستند ووقت الطباعة.</div></div>
                     <div class="field full"><button type="button" class="btn" id="printPreviewBtn">${A.icon('print')} معاينة الطباعة</button><div class="help">تعرض نموذجًا بالقيم المحفوظة حاليًا — احفظ الإعدادات ثم عاين لرؤية رأس الصفحة والخط الجديدين.</div></div>
                     <div class="form-section full"><h4>${A.icon('calendar')} العمل والدوام</h4></div>
                     <div class="field"><label>العملة</label><select id="s_currency">${A.currencyOptionsHtml(s.currency || 'ر.ي')}</select><div class="help">الافتراضي الريال اليمني (ر.ي) — وتظهر بجانب كل المبالغ في النظام والتقارير والمطبوعات.</div></div>
@@ -1312,6 +1315,8 @@
                         taxNumber: val('s_taxNumber'), crNumber: val('s_crNumber'), phone: val('s_phone'),
                         email: val('s_email'), address: val('s_address'), logo: A.imageFieldValue(generalForm, 'logo'),
                         printHeaderImage: A.imageFieldValue(generalForm, 'printHeaderImage'),
+                        printHeaderHeight: A.num(val('s_printHeaderHeight'), 170),
+                        printHrManagerName: val('s_printHrManagerName'), printDirectorName: val('s_printDirectorName'),
                         printFontFamily: val('s_printFontFamily'), printFontSize: A.num(val('s_printFontSize'), 12),
                         currency: val('s_currency'), currencyCode: (A.currencyOption(val('s_currency')) || {}).code || '',
                         operationalDayStart: val('s_operationalDayStart'),

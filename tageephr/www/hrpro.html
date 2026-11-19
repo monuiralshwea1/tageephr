@@ -13,10 +13,49 @@
     <style>
         .navbar, .footer, #navbar-breadcrumbs, .page-head { display: none !important; }
         body { margin: 0; }
+
+        /* شاشة الذكر عند تحديث الصفحة: خلفية سماوية ونص أبيض عريض 24px يظهر كلمة كلمة ويختفي بعد 3 ثوانٍ */
+        #dhikrLoader {
+            position: fixed; inset: 0; z-index: 99999; display: grid; place-items: center;
+            background: #0891b2; animation: dhikrFadeOut .6s ease 3s forwards;
+        }
+        #dhikrLoader .dhikr-box {
+            display: flex; flex-wrap: wrap; justify-content: center; gap: 10px;
+            padding: 22px 34px; border-radius: 18px; background: rgba(255, 255, 255, .14);
+            box-shadow: 0 18px 50px rgba(8, 47, 73, .25); max-width: 92vw;
+        }
+        #dhikrLoader .dhikr-word {
+            color: #ffffff; font-weight: 800; font-size: 24px; line-height: 1.6;
+            opacity: 0; transform: translateY(10px); animation: dhikrWordIn .55s ease forwards;
+        }
+        #dhikrLoader .dhikr-word:nth-child(1) { animation-delay: .10s; }
+        #dhikrLoader .dhikr-word:nth-child(2) { animation-delay: .50s; }
+        #dhikrLoader .dhikr-word:nth-child(3) { animation-delay: .90s; }
+        #dhikrLoader .dhikr-word:nth-child(4) { animation-delay: 1.30s; }
+        #dhikrLoader .dhikr-word:nth-child(5) { animation-delay: 1.70s; }
+        #dhikrLoader .dhikr-word:nth-child(6) { animation-delay: 2.10s; }
+        @keyframes dhikrWordIn { to { opacity: 1; transform: translateY(0); } }
+        @keyframes dhikrFadeOut { to { opacity: 0; visibility: hidden; pointer-events: none; } }
+
+        .dhikr-line {
+            margin: 10px 0 14px; padding: 10px 14px; border-radius: 12px; background: #0891b2;
+            color: #fff; font-weight: 800; font-size: 20px; text-align: center; letter-spacing: .2px;
+        }
     </style>
 
 </head>
 <body>
+    <div id="dhikrLoader" role="status" aria-live="polite">
+        <div class="dhikr-box">
+            <span class="dhikr-word">اذكر</span>
+            <span class="dhikr-word">الله</span>
+            <span class="dhikr-word">وصلِّ</span>
+            <span class="dhikr-word">على</span>
+            <span class="dhikr-word">النبي</span>
+            <span class="dhikr-word">ﷺ</span>
+        </div>
+    </div>
+
     <div id="boot" class="boot">
         <div class="boot-inner">
             <div class="boot-logo">T</div>
@@ -66,6 +105,7 @@
         <div class="auth-panel">
             <div class="auth-card">
                 <div class="logo">T</div>
+                <div class="dhikr-line">اذكر الله وصلِّ على النبي ﷺ</div>
                 <h2 id="authTitle">تسجيل الدخول</h2>
                 <div class="sub" id="authSub">أدخل بيانات حسابك للوصول إلى النظام</div>
                 <div id="authError" class="auth-error"></div>
@@ -172,10 +212,17 @@
     <div id="toastRoot" class="toast-root"></div>
     <div id="printRoot" style="display:none"></div>
 
-    <script src="/assets/tageephr/hrpro/assets/core.js?v=3.6.0"></script>
-    <script src="/assets/tageephr/hrpro/assets/modules-hr.js?v=3.4.0"></script>
+    <script>
+        // إزالة شاشة الذكر بعد 3 ثوانٍ (وإن تعطّل أي سكربت آخر)
+        setTimeout(function () {
+            var el = document.getElementById('dhikrLoader');
+            if (el) el.remove();
+        }, 3700);
+    </script>
+    <script src="/assets/tageephr/hrpro/assets/core.js?v=3.6.5"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-hr.js?v=3.5.0"></script>
     <script src="/assets/tageephr/hrpro/assets/modules-tasks.js?v=3.0.6"></script>
-    <script src="/assets/tageephr/hrpro/assets/modules-admin.js?v=3.6.0"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-admin.js?v=3.6.1"></script>
     <script src="/assets/tageephr/hrpro/assets/modules-accounts.js?v=3.3.2"></script>
     <script src="/assets/tageephr/hrpro/assets/boot.js"></script>
 </body>

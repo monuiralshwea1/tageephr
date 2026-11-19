@@ -34,6 +34,8 @@
     A.registerRoutes([
         { path: 'dashboard', module: 'dashboard', label: 'لوحة المعلومات', subtitle: 'نظرة عامة على أداء الموارد البشرية', icon: 'dashboard', group: 'الرئيسية', permission: 'dashboard' },
         { path: 'employees', module: 'employees', label: 'الموظفون', subtitle: 'إدارة ملفات الموظفين والعقود والمستندات', icon: 'users', group: 'الموارد البشرية', permission: 'employees' },
+        { path: 'transfers', module: 'transfers', label: 'نقل الموظفين', subtitle: 'نقل الموظف بين الفروع ومزامنة رقم البصمة إلى الجهاز الجديد', icon: 'exchange', group: 'الموارد البشرية', permission: 'employees' },
+        { path: 'promotions', module: 'promotions', label: 'الترقيات والزيادات', subtitle: 'ترقيات الموظفين وزيادات الرواتب والمسميات والرتب', icon: 'chart', group: 'الموارد البشرية', permission: 'employees' },
         { path: 'organization', module: 'organization', label: 'المؤسسة', subtitle: 'الفروع والأقسام والرتب وأوقات الدوام', icon: 'building', group: 'الموارد البشرية', permission: 'organization' },
         { path: 'attendance', module: 'attendance', label: 'الحضور والبصمة', subtitle: 'معالجة البصمات والتأخيرات والانصراف المبكر', icon: 'fingerprint', group: 'الوقت والحضور', permission: 'attendance' },
         { path: 'leaves', module: 'leaves', label: 'الإجازات', subtitle: 'الطلبات والأرصدة والاستحقاق وتحويل التأخير', icon: 'palmtree', group: 'الوقت والحضور', permission: 'leaves' }
@@ -210,6 +212,194 @@
         }
     });
 
+    // ═══════════════════════════════════════════════════════════
+    // نقل الموظفين بين الفروع + مزامنة البصمة
+    // ═══════════════════════════════════════════════════════════
+    const fingerprintBadge = fp => {
+        const status = (fp || {}).status || 'disabled';
+        const map = {
+            synced: ['active', 'تمت المزامنة'], queued: ['warning', 'في الطابور'],
+            sent: ['warning', 'أُرسل للوسيط'], failed: ['danger', 'فشلت المزامنة'],
+            no_pin: ['danger', 'لا يوجد رقم بصمة'], disabled: ['', 'غير مطلوبة']
+        };
+        const [cls, label] = map[status] || ['', status];
+        return `<span class="badge ${cls}">${h(label)}</span>`;
+    };
+
+    function openTransferModal(employee) {
+        const current = employee || {};
+        A.formModal({
+            title: employee ? `نقل ${employee.name} إلى فرع آخر` : 'نقل موظف بين الفروع',
+            size: 'lg',
+            fields: [
+                { key: 'employeeId', label: 'الموظف', type: 'select', options: A.options.employees(), required: true, disabled: !!employee },
+                { type: 'html', html: '<div class="help" id="transferCurrent"></div>' },
+                { key: 'branchId', label: 'الفرع الجديد', type: 'select', options: A.options.branches(), required: true, help: 'يُنقل الموظف فورًا إلى هذا الفرع.' },
+                { key: 'departmentId', label: 'القسم في الفرع الجديد', type: 'select', options: A.options.departments(), placeholder: 'الإبقاء على القسم الحالي' },
+                { key: 'jobTitle', label: 'المسمى الوظيفي الجديد', placeholder: 'اتركه فارغًا للإبقاء على الحالي' },
+                { key: 'effectiveDate', label: 'تاريخ النقل', type: 'date', required: true, default: A.today() },
+                { key: 'syncFingerprint', label: 'مزامنة رقم البصمة إلى جهاز الفرع الجديد', type: 'checkbox', default: true, help: 'يُضاف المستخدم برقم بصمته إلى جهاز البصمة في الفرع الجديد تلقائيًا عبر وسيط البصمة.' },
+                { key: 'reason', label: 'سبب النقل', type: 'textarea', full: true, placeholder: 'مثال: الحاجة التشغيلية في الفرع' }
+            ],
+            values: { employeeId: current.id || '', branchId: '', effectiveDate: A.today(), syncFingerprint: true },
+            submitLabel: 'تنفيذ النقل',
+            onOpen: (root) => {
+                const select = root.querySelector('[name="employeeId"]');
+                const info = root.querySelector('#transferCurrent');
+                const update = () => {
+                    const emp = A.employeeById(select.value) || {};
+                    info.innerHTML = emp.id
+                        ? `الفرع الحالي: <strong>${h(A.branchName(emp.branchId))}</strong> — رقم البصمة: <strong>${h(emp.fingerprintId || emp.employeeNumber || '—')}</strong>`
+                        : 'اختر الموظف لعرض فرعه الحالي ورقم بصمته.';
+                };
+                select.addEventListener('change', update);
+                update();
+            },
+            onSubmit: async data => {
+                data.syncFingerprint = !!data.syncFingerprint;
+                const result = await A.post(`/employees/${data.employeeId}/transfer`, data);
+                A.closeModal();
+                A.toast(result.message || 'تم نقل الموظف');
+                await A.refresh();
+            }
+        });
+    }
+
+    A.registerModule('transfers', {
+        render: async view => {
+            const result = await A.get('/collections/employeeTransfers?sort=createdAt&order=desc').catch(() => ({ data: [] }));
+            const rows = result.data || [];
+            const month = A.today().slice(0, 7);
+            const thisMonth = rows.filter(t => String(t.effectiveDate || t.createdAt || '').slice(0, 7) === month).length;
+            const queued = rows.filter(t => ['queued', 'sent'].includes(((t.fingerprint || {}).status) || '')).length;
+            view.innerHTML = `
+                <div class="grid grid-3">
+                    ${kpiCard({ label: 'عمليات النقل', value: A.numFmt(rows.length), sub: 'السجل الكامل', icon: 'exchange' })}
+                    ${kpiCard({ label: 'نقل هذا الشهر', value: A.numFmt(thisMonth), sub: month, icon: 'calendar', tone: 'info' })}
+                    ${kpiCard({ label: 'بانتظار مزامنة البصمة', value: A.numFmt(queued), sub: 'تُنفَّذ تلقائيًا عبر وسيط الفرع', icon: 'fingerprint', tone: queued ? 'warn' : '' })}
+                </div>
+                <div class="card mt">
+                    <div class="toolbar">
+                        <span class="small muted">سجل نقل الموظفين بين فروع الشركة</span>
+                        <span class="grow"></span>
+                        ${A.can('employees', 'edit') ? `<button class="btn btn-primary" id="transferAdd">${A.icon('exchange')} نقل موظف</button>` : ''}
+                    </div>
+                    ${A.table({
+                        columns: [
+                            { key: 'employeeName', label: 'الموظف', render: t => `<div class="employee-cell"><div class="avatar">${h(A.initials(t.employeeName))}</div><div><strong>${h(t.employeeName)}</strong><small>${h(t.employeeNumber || '—')}</small></div></div>` },
+                            { key: 'fromBranchName', label: 'من فرع', render: t => `<span class="badge">${h(t.fromBranchName || '—')}</span>` },
+                            { key: 'toBranchName', label: 'إلى فرع', render: t => `<span class="badge active">${h(t.toBranchName || '—')}</span>` },
+                            { key: 'toDepartmentName', label: 'القسم', render: t => h(t.toDepartmentName || '—') },
+                            { key: 'fingerprint', label: 'مزامنة البصمة', render: t => `${fingerprintBadge(t.fingerprint)}${(t.fingerprint || {}).pin ? `<br><small class="muted">${h(t.fingerprint.pin)}</small>` : ''}` },
+                            { key: 'effectiveDate', label: 'تاريخ النقل', render: t => A.date(t.effectiveDate) },
+                            { key: 'reason', label: 'السبب', render: t => h(t.reason || '—') }
+                        ],
+                        rows,
+                        actions: t => [{ title: 'ملف الموظف', icon: 'eye', action: 'viewEmp' }],
+                        empty: 'لا توجد عمليات نقل بعد — ابدأ بنقل موظف بين الفروع'
+                    })}
+                </div>`;
+            const add = document.getElementById('transferAdd');
+            if (add) add.onclick = () => openTransferModal(null);
+            A.bindActions({ viewEmp: id => { const t = rows.find(r => r.id === id); if (t) A.navigate('/employees/' + t.employeeId); } });
+        }
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // الترقيات وزيادات الرواتب
+    // ═══════════════════════════════════════════════════════════
+    const PROMOTION_TYPES = [
+        { value: 'promotion', label: 'ترقية' },
+        { value: 'salary', label: 'زيادة راتب' },
+        { value: 'allowance', label: 'زيادة بدل' },
+        { value: 'grade', label: 'تغيير رتبة' },
+        { value: 'position', label: 'تغيير مسمى وظيفي' },
+        { value: 'mixed', label: 'ترقية وزيادة' }
+    ];
+
+    function openPromotionModal(employee) {
+        A.formModal({
+            title: employee ? `ترقية / زيادة راتب — ${employee.name}` : 'ترقية موظف أو زيادة راتب',
+            size: 'lg',
+            fields: [
+                { key: 'employeeId', label: 'الموظف', type: 'select', options: A.options.employees(), required: true, disabled: !!employee },
+                { type: 'html', html: '<div class="help" id="promoCurrent"></div>' },
+                { key: 'type', label: 'نوع التغيير', type: 'select', options: PROMOTION_TYPES, required: true },
+                { key: 'newJobTitle', label: 'المسمى الوظيفي الجديد', placeholder: 'اتركه فارغًا للإبقاء على الحالي' },
+                { key: 'newJobGradeId', label: 'الرتبة الوظيفية الجديدة', type: 'select', options: A.options.grades(), placeholder: 'الإبقاء على الحالية' },
+                { key: 'newBaseSalary', label: 'الراتب الأساسي الجديد', type: 'number', step: '0.01', placeholder: 'اتركه فارغًا للإبقاء على الحالي', help: 'يُحدَّث راتب الموظف فورًا وتُسجَّل الزيادة في سجله.' },
+                { key: 'effectiveDate', label: 'تاريخ سريان الترقية', type: 'date', required: true, default: A.today() },
+                { key: 'reason', label: 'مبرر الترقية / الزيادة', type: 'textarea', full: true, placeholder: 'مثال: تقييم الأداء السنوي' }
+            ],
+            values: { employeeId: employee ? employee.id : '', type: 'promotion', effectiveDate: A.today() },
+            submitLabel: 'تسجيل الترقية',
+            onOpen: root => {
+                const select = root.querySelector('[name="employeeId"]');
+                const info = root.querySelector('#promoCurrent');
+                const update = () => {
+                    const emp = A.employeeById(select.value) || {};
+                    info.innerHTML = emp.id
+                        ? `الحالي: <strong>${A.money(emp.baseSalary)}</strong> — ${h(emp.jobTitle || 'بدون مسمى')} — ${h(A.branchName(emp.branchId))}`
+                        : 'اختر الموظف لعرض راتبه ومسماه الحاليين.';
+                };
+                select.addEventListener('change', update);
+                update();
+            },
+            onSubmit: async data => {
+                if (data.newBaseSalary === '') delete data.newBaseSalary;
+                const result = await A.post(`/employees/${data.employeeId}/promotion`, data);
+                A.closeModal();
+                A.toast(result.message || 'تم تسجيل الترقية');
+                await A.refresh();
+            }
+        });
+    }
+
+    A.registerModule('promotions', {
+        render: async view => {
+            const result = await A.get('/collections/employeePromotions?sort=createdAt&order=desc').catch(() => ({ data: [] }));
+            const rows = result.data || [];
+            const month = A.today().slice(0, 7);
+            const thisMonth = rows.filter(p => String(p.effectiveDate || p.createdAt || '').slice(0, 7) === month);
+            const totalIncrease = thisMonth.reduce((sum, p) => sum + A.num(p.salaryIncrease), 0);
+            const pct = p => {
+                const before = A.num(p.oldBaseSalary);
+                return before > 0 ? A.round2((A.num(p.salaryIncrease) / before) * 100) : 0;
+            };
+            view.innerHTML = `
+                <div class="grid grid-3">
+                    ${kpiCard({ label: 'الترقيات والزيادات', value: A.numFmt(rows.length), sub: 'السجل الكامل', icon: 'chart' })}
+                    ${kpiCard({ label: 'عمليات هذا الشهر', value: A.numFmt(thisMonth.length), sub: month, icon: 'calendar', tone: 'info' })}
+                    ${kpiCard({ label: 'إجمالي الزيادة الشهرية', value: A.money(totalIncrease, false), sub: 'مجموع فروق الرواتب', icon: 'wallet', tone: totalIncrease ? 'purple' : '' })}
+                </div>
+                <div class="card mt">
+                    <div class="toolbar">
+                        <span class="small muted">الترقيات وتغيير المسميات والرتب وزيادات الرواتب</span>
+                        <span class="grow"></span>
+                        ${A.can('employees', 'edit') ? `<button class="btn btn-primary" id="promoAdd">${A.icon('plus')} ترقية / زيادة راتب</button>` : ''}
+                    </div>
+                    ${A.table({
+                        columns: [
+                            { key: 'employeeName', label: 'الموظف', render: p => `<div class="employee-cell"><div class="avatar">${h(A.initials(p.employeeName))}</div><div><strong>${h(p.employeeName)}</strong><small>${h(p.employeeNumber || '—')}</small></div></div>` },
+                            { key: 'typeLabel', label: 'النوع', render: p => `<span class="badge">${h(p.typeLabel || p.type || '—')}</span>` },
+                            { key: 'newJobTitle', label: 'المسمى', render: p => p.newJobTitle && p.newJobTitle !== p.oldJobTitle ? `${h(p.oldJobTitle || '—')} ← <strong>${h(p.newJobTitle)}</strong>` : h(p.newJobTitle || '—') },
+                            { key: 'newBaseSalary', label: 'الراتب', align: 'left', render: p => A.num(p.salaryIncrease)
+                                ? `${A.money(p.oldBaseSalary, false)} ← <strong>${A.money(p.newBaseSalary, false)}</strong><br><small class="muted">+${A.numFmt(pct(p), 1)}%</small>`
+                                : A.money(p.newBaseSalary) },
+                            { key: 'effectiveDate', label: 'تاريخ السريان', render: p => A.date(p.effectiveDate) },
+                            { key: 'reason', label: 'المبرر', render: p => h(p.reason || '—') }
+                        ],
+                        rows,
+                        actions: p => [{ title: 'ملف الموظف', icon: 'eye', action: 'viewEmp' }],
+                        empty: 'لا توجد ترقيات مسجلة — سجّل أول ترقية أو زيادة راتب'
+                    })}
+                </div>`;
+            const add = document.getElementById('promoAdd');
+            if (add) add.onclick = () => openPromotionModal(null);
+            A.bindActions({ viewEmp: id => { const p = rows.find(r => r.id === id); if (p) A.navigate('/employees/' + p.employeeId); } });
+        }
+    });
+
     function makeEmployeeFilterState() { return { search: '', branchId: '', departmentId: '', status: '' }; }
 
     function renderEmployeeList(view, state) {
@@ -275,6 +465,12 @@
         document.getElementById('empExport').onclick = () => A.downloadGet('/export/employees', 'employees.xlsx').catch(err => A.toast(err.message, 'error'));
         document.getElementById('empPrint').onclick = () => A.printTable({
             title: 'كشف الموظفين',
+            filters: [
+                state.search ? { label: 'بحث', value: state.search } : null,
+                state.branchId ? { label: 'الفرع', value: A.branchName(state.branchId) } : null,
+                state.departmentId ? { label: 'القسم', value: A.deptName(state.departmentId) } : null,
+                state.status ? { label: 'الحالة', value: state.status === 'active' ? 'نشط' : 'منتهي' } : null
+            ].filter(Boolean),
             columns: [
                 { label: 'الرقم', render: e => h(e.employeeNumber) },
                 { label: 'الاسم', render: e => h(e.name) },
@@ -332,6 +528,8 @@
                     </div>
                     <div class="flex gap">
                         ${A.can('employees', 'edit') ? `<button class="btn" id="profileEdit">${A.icon('edit')} تعديل</button>` : ''}
+                        ${A.can('employees', 'edit') ? `<button class="btn" id="profileTransfer">${A.icon('exchange')} نقل</button>` : ''}
+                        ${A.can('employees', 'edit') ? `<button class="btn" id="profilePromote">${A.icon('chart')} ترقية / زيادة</button>` : ''}
                         ${A.can('leaves', 'add') ? `<button class="btn" id="profileLeave">${A.icon('palmtree')} طلب إجازة</button>` : ''}
                         ${A.can('payroll', 'add') ? `<button class="btn btn-primary" id="profileEos">${A.icon('money')} تسوية نهاية الخدمة</button>` : ''}
                     </div>
@@ -368,6 +566,35 @@
                             const type = (A.state.data.leaveTypes || []).find(t => t.id === b.leaveTypeId) || {};
                             return `<div class="stat-line"><span>${h(type.name || b.leaveTypeId)} (${b.year})</span><strong>${A.numFmt(b.balance, 1)} يوم</strong></div>`;
                         }).join('') : emptyState('لم تُنشأ أرصدة بعد — شغّل الاستحقاق من شاشة الإجازات')}
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mt">
+                <div class="card-head"><h3>سجل النقل والترقيات</h3><span class="spacer"></span><span class="badge">${A.numFmt((data.transfers || []).length + (data.promotions || []).length)} حركة</span></div>
+                <div class="card-pad">
+                    <div class="grid grid-2">
+                        <div>
+                            <h4 class="section-title">آخر عمليات النقل</h4>
+                            ${A.table({
+                                columns: [
+                                    { key: 'fromBranchName', label: 'من', render: t => h(t.fromBranchName || '—') },
+                                    { key: 'toBranchName', label: 'إلى', render: t => h(t.toBranchName || '—') },
+                                    { key: 'effectiveDate', label: 'التاريخ', render: t => A.date(t.effectiveDate) },
+                                    { key: 'fingerprint', label: 'البصمة', render: t => fingerprintBadge(t.fingerprint) }
+                                ], rows: data.transfers || [], empty: 'لم يُنقل الموظف بين الفروع'
+                            })}
+                        </div>
+                        <div>
+                            <h4 class="section-title">آخر الترقيات والزيادات</h4>
+                            ${A.table({
+                                columns: [
+                                    { key: 'typeLabel', label: 'النوع', render: p => h(p.typeLabel || p.type || '—') },
+                                    { key: 'newBaseSalary', label: 'الراتب', align: 'left', render: p => A.num(p.salaryIncrease) ? `${A.money(p.oldBaseSalary, false)} ← <strong>${A.money(p.newBaseSalary, false)}</strong>` : A.money(p.newBaseSalary) },
+                                    { key: 'effectiveDate', label: 'التاريخ', render: p => A.date(p.effectiveDate) }
+                                ], rows: data.promotions || [], empty: 'لا توجد ترقيات مسجلة'
+                            })}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -474,6 +701,10 @@
         document.getElementById('empBack').onclick = () => A.navigate('/employees');
         const editBtn = document.getElementById('profileEdit');
         if (editBtn) editBtn.onclick = () => employeeForm(emp);
+        const transferBtn = document.getElementById('profileTransfer');
+        if (transferBtn) transferBtn.onclick = () => openTransferModal(emp);
+        const promoteBtn = document.getElementById('profilePromote');
+        if (promoteBtn) promoteBtn.onclick = () => openPromotionModal(emp);
         const leaveBtn = document.getElementById('profileLeave');
         if (leaveBtn) leaveBtn.onclick = () => openLeaveRequestModal(emp.id, () => A.route());
         const eosBtn = document.getElementById('profileEos');

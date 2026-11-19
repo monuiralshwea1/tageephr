@@ -930,78 +930,128 @@
     };
 
     // ───────────── الطباعة والتصدير ─────────────
-    // رأس الطباعة يتكرر في كل صفحة: العنصر مثبّت (position:fixed) أعلى كل صفحة،
-    // ويُحجز ارتفاعه في كل صفحة عبر صف فارغ داخل <thead> لجدول يحيط بالمحتوى.
-    App.print = ({ title, subtitle = '', html, landscape = false }) => {
+    // الرأس المطبوع يتكرر في كل صفحة عبر thead لجدول الغلاف (.print-shell). كروم لا يكرر thead
+    // إلا إذا كان أقصر من ربع ارتفاع الصفحة القابلة للطباعة (CSS Tables 3)، لذلك يحمل الرأس
+    // المتكرر صورة الهيدر والخط الفاصل فقط، ويظهر اسم التقرير والفلاتر مرة واحدة أعلى الجدول،
+    // وتتكرر رؤوس أعمدة الجدول من thead الجدول نفسه. هامش @page العلوي = 0 لتلتصق الصورة بحافة
+    // الورق بلا الفراغ الكبير الذي كان يسببه position:fixed.
+    App.print = ({ title, subtitle = '', html, landscape = false, filters = [] }) => {
         const settings = App.state.data.settings || {};
-        const paper = settings.printerPaperSize || 'A4';
+        const isLetter = String(settings.printerPaperSize || 'A4').toUpperCase() === 'LETTER';
+        const paper = isLetter ? 'Letter' : 'A4';
+        // أبعاد الورق بالمليمتر؛ الطباعة الأفقية تبدّل العرض بالارتفاع
+        const [paperW, paperH] = isLetter ? [216, 279] : [210, 297];
+        const pageW = landscape ? paperH : paperW;
+        const pageH = landscape ? paperW : paperH;
+        const pxPerMm = 96 / 25.4;
         const fontSize = Math.min(24, Math.max(7, App.num(settings.printFontSize, 12) || 12));
         const fontFamily = settings.printFontFamily || '"Segoe UI", Tahoma, sans-serif';
         const banner = settings.printHeaderImage || '';
+        // ارتفاع صورة الرأس (px) من الإعدادات، مقيّدًا بألا يتجاوز ربع الصفحة القابلة للطباعة
+        // (بعد هامش 8mm السفلي) وإلا توقف كروم عن تكرار الرأس — وهو ما يحدث في الورق الأفقي.
+        const repeatLimit = Math.floor((pageH - 8) * pxPerMm / 4) - 20;
+        const headerHeight = Math.min(repeatLimit, Math.min(400, Math.max(40, App.num(settings.printHeaderHeight, 170) || 170)));
         const logo = settings.logo || '';
         const company = settings.companyName || 'Tageep HRMS';
         const meta = [
-            `تاريخ الطباعة: ${App.date(App.today())}`,
             settings.taxNumber ? `الرقم الضريبي: ${settings.taxNumber}` : '',
             settings.crNumber ? `السجل التجاري: ${settings.crNumber}` : '',
             settings.phone ? `هاتف: ${settings.phone}` : '',
-            settings.email ? settings.email : ''
+            settings.email || ''
         ].filter(Boolean);
         const logoHtml = logo
             ? `<img class="ph-logo" src="${escapeHtml(logo)}" alt="">`
             : `<div class="ph-mark">T</div>`;
         const headerHtml = banner
-            ? `<img class="print-banner" src="${escapeHtml(banner)}" alt="${escapeHtml(company)}">`
-            : `<div class="print-head">
+            ? `<div class="print-head-bar"><img class="print-banner" src="${escapeHtml(banner)}" alt="${escapeHtml(company)}"></div>`
+            : `<div class="print-head-bar"><div class="print-head">
                     <div class="ph-brand">${logoHtml}<div><h1>${escapeHtml(company)}</h1>${settings.companyNameEn ? `<div class="ph-en">${escapeHtml(settings.companyNameEn)}</div>` : ''}</div></div>
-                    <div class="ph-meta">${meta.map(escapeHtml).join('<br>')}</div>
-                </div>`;
-        const titleHtml = `<div class="print-title"><h2>${escapeHtml(title)}${subtitle ? `<span style="font-size:${Math.max(9, fontSize)}px;font-weight:400;color:#334155"> — ${escapeHtml(subtitle)}</span>` : ''}</h2><div class="ph-meta">${escapeHtml(App.date(App.today()))}</div></div>`;
+                    <div class="ph-meta">${meta.map(escapeHtml).join(' • ')}</div>
+                </div></div>`;
+        const filterList = (Array.isArray(filters) ? filters : [filters])
+            .filter(Boolean)
+            .map(f => (typeof f === 'string' || typeof f === 'number' ? { label: '', value: f } : f))
+            .filter(f => f && f.value !== '' && f.value !== null && f.value !== undefined && String(f.value).trim() !== '');
+        const filtersHtml = filterList.length
+            ? `<div class="print-filters"><span class="pf-title">الفلاتر المحددة:</span>${filterList.map(f => `<span class="pf">${f.label ? `<span class="pf-label">${escapeHtml(f.label)}:</span> ` : ''}${escapeHtml(String(f.value))}</span>`).join('<span class="pf-sep">|</span>')}</div>`
+            : '';
+        const titleHtml = `<div class="print-title"><h2>${escapeHtml(title)}${subtitle ? `<span class="ph-sub"> — ${escapeHtml(subtitle)}</span>` : ''}</h2><div class="ph-meta">${escapeHtml(App.date(App.today()))}</div></div>${filtersHtml}`;
+        // تذييل موحد لكل المطبوعات: توقيع مدير الموارد البشرية والمدير العام/نائبه، واسم من طبع المستند.
+        // تُحقن كـ tfoot في جدول البيانات فتتكرر أسفل كل صفحة (وليس مرة واحدة في آخر المستند).
+        if (/class="data"/.test(html) && !/print-foot-row/.test(html) && html.lastIndexOf('</table>') !== -1) {
+            const printUser = App.state.user || {};
+            const signCell = (label, name) => `<div class="sign-block"><span class="sign-title">${escapeHtml(label)}</span><span class="sign-line"></span><span class="sign-name">${escapeHtml(name || '')}</span></div>`;
+            const footer = `<tfoot><tr class="print-foot-row"><td colspan="${(((html.match(/<thead>[\s\S]*?<\/thead>/) || [''])[0].match(/<th/g) || []).length || 1)}">
+                <div class="print-sign">
+                    ${signCell('توقيع مدير الموارد البشرية', settings.printHrManagerName)}
+                    ${signCell('توقيع المدير العام / نائب المدير العام', settings.printDirectorName)}
+                </div>
+                <div class="print-foot">${escapeHtml(settings.payslipFooterNote || '')}${settings.payslipFooterNote ? ' — ' : ''}تم إنشاء هذا المستند آليًا بواسطة Tageep HRMS
+                    <span class="print-printed-by">طُبع بواسطة: ${escapeHtml(printUser.name || '—')}${printUser.roleLabel ? ' — ' + escapeHtml(printUser.roleLabel) : ''} • ${escapeHtml(App.dateTime(new Date().toISOString()))}</span>
+                </div>
+            </td></tr></tfoot>`;
+            const cut = html.lastIndexOf('</table>');
+            html = html.slice(0, cut) + footer + html.slice(cut);
+        }
         const doc = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+            <style>@page{size:${paper} ${landscape ? 'landscape' : 'portrait'};margin:0 8mm 8mm}</style>
             <style>
                 *{box-sizing:border-box}
-                html,body{background:#fff;color:#0f172a;margin:0;padding:0;font-family:${fontFamily};font-size:${fontSize}px;line-height:1.6;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-                /* الرأس المتكرر: مثبّت أعلى كل صفحة */
-                .print-running{position:fixed;top:0;left:0;right:0;background:#fff;padding:0 0 4px;z-index:20}
-                /* جدول الغلاف: صف <thead> فارغ يحجز ارتفاع الرأس في كل صفحة */
-                .print-shell{width:100%;border-collapse:collapse;table-layout:fixed}
-                .print-shell>thead>tr>th,.print-shell>thead>tr>td{padding:0 !important;border:0 !important;background:transparent !important;height:0}
-                .print-shell>tbody>tr>td{padding:0 !important;border:0 !important;background:transparent !important;vertical-align:top}
-                .print-banner{display:block;width:100%;height:auto;margin:0 0 8px}
-                .print-head{display:flex;justify-content:space-between;gap:16px;align-items:center;border-bottom:2px solid #0d9488;padding-bottom:10px;margin-bottom:8px}
-                .ph-brand{display:flex;gap:10px;align-items:center}
-                .ph-logo{height:${Math.round(fontSize * 4.2)}px;max-width:190px;object-fit:contain}
-                .ph-mark{width:${Math.round(fontSize * 3.6)}px;height:${Math.round(fontSize * 3.6)}px;border-radius:10px;background:#0d9488;color:#fff;display:grid;place-items:center;font-weight:800;font-size:${Math.round(fontSize * 1.5)}px}
-                .print-head h1{font-size:${fontSize + 7}px;margin:0;color:#0f766e}
-                .ph-en{font-size:${Math.max(9, fontSize - 2)}px;color:#475569;direction:ltr;text-align:right}
-                .ph-meta{font-size:${Math.max(8, fontSize - 2)}px;color:#334155;line-height:1.7;text-align:left}
-                .print-title{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;border-bottom:1px solid #64748b;padding-bottom:6px;margin-bottom:12px;page-break-after:avoid}
-                .print-title h2{font-size:${fontSize + 4}px;margin:0;flex:1}
+                html,body{background:#fff;color:#0f172a;margin:0;padding:0;font-family:${fontFamily};font-size:${fontSize}px;line-height:1.45;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+                /* صورة الرأس في أعلى الصفحة تمامًا، بلا فراغ فوقها، وبعرض الصفحة حسب نوع الورق */
+                /* جدول الغلاف: رأسه (thead) يتكرر في أعلى كل صفحة مطبوعة */
+                table.print-shell{width:100%;border-collapse:collapse;table-layout:fixed}
+                table.print-shell>thead{display:table-header-group}
+                table.print-shell>thead>tr>td, table.print-shell>tbody>tr>td{border:0;padding:0;vertical-align:top}
+                .print-head-bar{width:100%;border-bottom:1px solid #000;padding-bottom:1.5mm;margin:0 0 2mm;page-break-inside:avoid}
+                .print-banner{display:block;width:100%;height:${headerHeight}px;object-fit:cover;object-position:center}
+                .print-head{display:flex;justify-content:space-between;gap:12px;align-items:center}
+                .ph-brand{display:flex;gap:8px;align-items:center}
+                .ph-logo{height:${Math.round(fontSize * 2.3)}px;max-width:150px;object-fit:contain}
+                .ph-mark{width:${Math.round(fontSize * 1.9)}px;height:${Math.round(fontSize * 1.9)}px;border-radius:6px;background:#0d9488;color:#fff;display:grid;place-items:center;font-weight:800;font-size:${Math.round(fontSize * 0.95)}px}
+                .print-head h1{font-size:${fontSize + 2}px;margin:0;color:#0f766e;line-height:1.25}
+                .ph-en{font-size:${Math.max(8, fontSize - 3)}px;color:#475569;direction:ltr;text-align:right;line-height:1.2}
+                .ph-meta{font-size:${Math.max(7.5, fontSize - 3)}px;color:#334155;line-height:1.4;text-align:left}
+                .print-title{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;border-bottom:1px solid #64748b;padding-bottom:3px;margin:0 0 4px;page-break-after:avoid;page-break-inside:avoid}
+                .print-title h2{font-size:${fontSize + 2}px;margin:0;flex:1}
+                .ph-sub{font-size:${Math.max(9, fontSize - 1)}px;font-weight:400;color:#334155}
                 .print-title .ph-meta{white-space:nowrap}
-                .print-sign{display:flex;justify-content:space-between;margin-top:34px;font-size:${Math.max(8, fontSize - 1)}px;color:#334155}
-                .print-foot{margin-top:16px;font-size:${Math.max(7.5, fontSize - 2.5)}px;color:#475569;text-align:center;border-top:1px dashed #94a3b8;padding-top:6px}
+                .print-filters{font-size:${Math.max(7.5, fontSize - 2.5)}px;color:#334155;line-height:1.8;margin:0 0 6px;page-break-after:avoid;page-break-inside:avoid}
+                .print-filters .pf-title{font-weight:700;color:#0f172a;margin-inline-end:6px}
+                .print-filters .pf{background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:1px 5px;white-space:nowrap}
+                .print-filters .pf-label{color:#475569}
+                .print-filters .pf-sep{color:#94a3b8;margin:0 5px}
+                .print-sign{display:flex;justify-content:space-between;gap:18px;padding-top:8px;font-size:${Math.max(8, fontSize - 1)}px;color:#334155}
+                .print-sign .sign-block{flex:1;text-align:center}
+                .print-sign .sign-title{display:block;font-weight:700;color:#0f172a;white-space:nowrap}
+                .print-sign .sign-line{display:block;border-bottom:1px solid #000;height:14px;width:78%;margin:2px auto 1px}
+                .print-sign .sign-name{display:block;font-size:${Math.max(7.5, fontSize - 2)}px;color:#475569;min-height:10px}
+                .print-foot{margin-top:5px;font-size:${Math.max(7.5, fontSize - 2.5)}px;color:#475569;text-align:center}
+                .print-printed-by{display:block;margin-top:2px;color:#334155}
+                .print-foot-row>td{border:0 !important;padding:0 5px !important}
                 table{width:100%;border-collapse:collapse}
                 table.data{font-size:${Math.max(8, fontSize - 1)}px}
-                table.data th, table.data td{border:1px solid #000 !important;padding:5px 6px;vertical-align:middle}
-                table.data th{background:#e2e8f0 !important;color:#000 !important;font-weight:700;text-align:right;position:static}
+                /* رأس أعمدة الجدول يتكرر أعلى كل صفحة، والتوقيع أسفل كل صفحة */
+                table.data thead{display:table-header-group}
+                table.data tfoot{display:table-footer-group}
+                table.data th, table.data td{border:1px solid #000 !important;padding:4px 5px;vertical-align:middle}
+                table.data th{background:#e2e8f0 !important;color:#000 !important;font-weight:700;text-align:right}
                 table.data td{text-align:right}
                 table.data .num{text-align:left}
                 table.data tr{page-break-inside:avoid}
-                table.data thead{display:table-header-group}
-                .print-area{display:block !important}
-                @page{size:${paper} ${landscape ? 'landscape' : 'portrait'};margin:8mm}
             </style></head><body>
-            <div class="print-running" id="printRunning">${headerHtml}</div>
-            <table class="print-shell"><thead><tr><th class="print-spacer" id="printSpacer"></th></tr></thead>
-            <tbody><tr><td class="print-main">
+            <table class="print-shell"><thead>
+                <tr><td>${headerHtml}</td></tr>
+            </thead><tbody><tr><td class="print-content">
             ${titleHtml}
             ${html}
-            <div class="print-sign"><span>توقيع الموارد البشرية: ____________________</span><span>توقيع الإدارة: ____________________</span></div>
-            <div class="print-foot">${escapeHtml(settings.payslipFooterNote || '')}${settings.payslipFooterNote ? ' — ' : ''}تم إنشاء هذا المستند آليًا بواسطة Tageep HRMS</div>
             </td></tr></tbody></table>
             </body></html>`;
+        // عرض الإطار = عرض محتوى الصفحة المطبوع فعليًا (بعد هوامش 8mm) حتى تتوزع أعمدة
+        // الجداول كما ستظهر في الطباعة.
+        const frameWidth = Math.round((pageW - 16) * pxPerMm);
         const frame = document.createElement('iframe');
-        frame.style.cssText = 'position:fixed;left:-9999px;width:0;height:0;border:0';
+        frame.style.cssText = `position:fixed;left:-9999px;top:0;width:${frameWidth}px;height:800px;border:0`;
         document.body.appendChild(frame);
         const docFrame = frame.contentWindow.document;
         docFrame.open(); docFrame.write(doc); docFrame.close();
@@ -1009,15 +1059,6 @@
         const firePrint = () => {
             if (printed) return;
             printed = true;
-            // احجز مساحة الرأس في كل صفحة بمطابقة ارتفاعه الفعلي
-            try {
-                const running = docFrame.getElementById('printRunning');
-                const spacer = docFrame.getElementById('printSpacer');
-                if (running && spacer) {
-                    const h = Math.ceil(running.getBoundingClientRect().height) + 4;
-                    spacer.style.height = h + 'px';
-                }
-            } catch (_) {}
             try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch (_) {}
             setTimeout(() => frame.remove(), 2000);
         };
@@ -1033,9 +1074,25 @@
         setTimeout(waitForImages, 120);
     };
 
-    App.printTable = ({ title, subtitle, columns, rows, landscape }) => {
-        const html = `<table class="data"><thead><tr>${columns.map(c => `<th>${escapeHtml(c.label)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${columns.map(c => `<td>${c.render ? c.render(r) : escapeHtml(r[c.key] === undefined || r[c.key] === null ? '' : r[c.key])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-        App.print({ title, subtitle, html, landscape });
+    App.printTable = ({ title, subtitle, filters, columns, rows, landscape }) => {
+        const settings = App.state.data.settings || {};
+        const thead = `<thead><tr>${columns.map(c => `<th>${escapeHtml(c.label)}</th>`).join('')}</tr></thead>`;
+        const tbody = `<tbody>${rows.map(r => `<tr>${columns.map(c => `<td>${c.render ? c.render(r) : escapeHtml(r[c.key] === undefined || r[c.key] === null ? '' : r[c.key])}</td>`).join('')}</tr>`).join('')}</tbody>`;
+        // توقيع أسفل كل صفحة داخل tfoot الجدول: يمنع انزلاق التوقيع وحده إلى صفحة إضافية
+        // ويحفظ مساحة سفلية ثابتة للطباعة متعددة الصفحات.
+        const user = App.state.user || {};
+        const signBlock = (title, name) => `<div class="sign-block"><span class="sign-title">${escapeHtml(title)}</span><span class="sign-line"></span><span class="sign-name">${escapeHtml(name || '')}</span></div>`;
+        const tfoot = `<tfoot><tr class="print-foot-row"><td colspan="${columns.length || 1}">
+            <div class="print-sign">
+                ${signBlock('توقيع مدير الموارد البشرية', settings.printHrManagerName)}
+                ${signBlock('توقيع المدير العام / نائب المدير العام', settings.printDirectorName)}
+            </div>
+            <div class="print-foot">${escapeHtml(settings.payslipFooterNote || '')}${settings.payslipFooterNote ? ' — ' : ''}تم إنشاء هذا المستند آليًا بواسطة Tageep HRMS
+                <span class="print-printed-by">طُبع بواسطة: ${escapeHtml(user.name || '—')}${user.roleLabel ? ' — ' + escapeHtml(user.roleLabel) : ''} • ${escapeHtml(App.dateTime(new Date().toISOString()))}</span>
+            </div>
+        </td></tr></tfoot>`;
+        const html = `<table class="data">${thead}${tbody}${tfoot}</table>`;
+        App.print({ title, subtitle, filters, html, landscape });
     };
 
     App.exportCsv = (filename, columns, rows) => {

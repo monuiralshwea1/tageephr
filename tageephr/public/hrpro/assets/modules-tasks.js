@@ -297,6 +297,14 @@
                 if (add) add.onclick = () => taskForm(null);
                 document.getElementById('taskPrint').onclick = () => A.printTable({
                     title: 'تقرير المهام', subtitle: `${rows.length} مهمة`,
+                    filters: [
+                        taskFilters.search ? { label: 'بحث', value: taskFilters.search } : null,
+                        taskFilters.status ? { label: 'الحالة', value: taskFilters.status } : null,
+                        taskFilters.priority ? { label: 'الأولوية', value: PRIORITY[taskFilters.priority] || taskFilters.priority } : null,
+                        taskFilters.employeeId ? { label: 'الموظف', value: A.employeeName(taskFilters.employeeId) } : null,
+                        taskFilters.branchId ? { label: 'الفرع', value: A.branchName(taskFilters.branchId) } : null,
+                        taskFilters.overdue ? { label: 'المتأخرة فقط', value: 'نعم' } : null
+                    ].filter(Boolean),
                     columns: [
                         { label: 'الموظف', render: t => h(A.employeeName(t.employeeId) || t.employeeName || '') },
                         { label: 'الفرع', render: t => h(A.branchName(t.branchId) || '') },
@@ -373,6 +381,12 @@
                 ['reqType', 'reqStatus', 'reqEmployee'].forEach(id => { document.getElementById(id).onchange = apply; });
                 document.getElementById('reqPrint').onclick = () => A.printTable({
                     title: 'تقرير طلبات الموظفين', subtitle: `${rows.length} طلب`,
+                    filters: [
+                        reqFilters.search ? { label: 'بحث', value: reqFilters.search } : null,
+                        reqFilters.type ? { label: 'النوع', value: REQUEST_TYPES[reqFilters.type] || reqFilters.type } : null,
+                        reqFilters.status ? { label: 'الحالة', value: REQUEST_STATUS[reqFilters.status] || reqFilters.status } : null,
+                        reqFilters.employeeId ? { label: 'الموظف', value: A.employeeName(reqFilters.employeeId) } : null
+                    ].filter(Boolean),
                     columns: [
                         { label: 'التاريخ', render: r => A.dateTime(r.createdAt) },
                         { label: 'الموظف', render: r => h(r.employeeName || '') },

@@ -19,6 +19,7 @@ COLLECTIONS = [
 	"employeeDocuments", "payrollSettings", "leavePolicy", "documentTypes",
 	"eosSettlements", "approvalRequests",
 	"tasks", "taskComments", "selfRequests",
+	"employeeTransfers", "employeePromotions", "fingerprintCommands",
 	"accounts", "vouchers",
 ]
 
@@ -79,7 +80,8 @@ DEFAULT_SETTINGS = {
 	"themeColor": "#0d9488", "sidebarColor": "#0070CC",
 	"lateArrivalDeduction": 0, "earlyDepartureDeduction": 0, "absentDeductionDays": 1,
 	"taxRate": 0, "taxExemptLimit": 0, "taxCalcMethod": "net",
-	"printerPaperSize": "A4", "printHeaderImage": "",
+	"printerPaperSize": "A4", "printHeaderImage": "", "printHeaderHeight": 170,
+	"printHrManagerName": "", "printDirectorName": "",
 	"printFontFamily": '"Segoe UI", Tahoma, sans-serif', "printFontSize": 12,
 	"payslipFooterNote": "", "allowEmployeeSelfService": True,
 	"fingerprintDevice": {"type": "none", "ip": "", "port": 4370, "user": "", "pass": "", "syncMode": "manual"},
