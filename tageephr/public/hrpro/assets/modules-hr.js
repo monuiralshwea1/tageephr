@@ -440,6 +440,7 @@
                     rows: employees,
                     actions: e => [
                         { title: 'الملف', icon: 'eye', action: 'view' },
+                        ...(A.can('users', 'add') ? [{ title: 'حساب الخدمة الذاتية', icon: 'user', action: 'selfUser' }] : []),
                         ...(A.can('employees', 'edit') ? [{ title: 'تعديل', icon: 'edit', action: 'edit' }] : []),
                         ...(A.can('employees', 'delete') ? [{ title: 'حذف', icon: 'trash', action: 'del', class: 'btn-danger' }] : [])
                     ],
@@ -496,6 +497,31 @@
         A.bindActions({
             view: id => A.navigate('/employees/' + id),
             edit: id => employeeForm(A.employeeById(id)),
+            selfUser: async id => {
+                const emp = A.employeeById(id);
+                if (!emp) return;
+                const yes = await A.confirm({
+                    title: 'حساب خدمة ذاتية',
+                    message: `سيُنشأ حساب للموظف <strong>${h(emp.name)}</strong> يدخل به الخدمة الذاتية ويشاهد بياناته فقط.`,
+                    confirmLabel: 'إنشاء الحساب'
+                });
+                if (!yes) return;
+                try {
+                    const result = await A.post(`/employees/${id}/self-account`);
+                    const info = result.data || {};
+                    if (!info.password) return A.toast(result.message);
+                    A.rawModal({
+                        title: 'بيانات حساب الخدمة الذاتية',
+                        body: `<div class="alert warning">${A.icon('alert')}<div>سلّم هذه البيانات للموظف — لن تُعرض كلمة المرور مرة أخرى.</div></div>
+                            <div class="info-list">
+                                <div><span>الموظف</span><strong>${h(emp.name)}</strong></div>
+                                <div><span>اسم الدخول</span><strong dir="ltr">${h(info.username)}</strong></div>
+                                <div><span>كلمة المرور</span><strong dir="ltr">${h(info.password)}</strong></div>
+                            </div>`,
+                        footer: '<button class="btn btn-primary" data-close>تم</button>'
+                    });
+                } catch (err) { A.toast(err.message, 'error'); }
+            },
             del: async id => {
                 const emp = A.employeeById(id);
                 if (!(await A.confirm({ title: 'حذف موظف', message: `هل تريد حذف ${h(emp.name)}؟ لا يمكن التراجع.`, danger: true, confirmLabel: 'حذف' }))) return;
@@ -752,6 +778,9 @@
                                 { key: 'address', label: 'العنوان', render: b => h(b.address || '—') },
                                 { key: 'phone', label: 'الهاتف', render: b => h(b.phone || '—') },
                                 { key: 'managerId', label: 'المدير', render: b => h(A.employeeName(b.managerId)) },
+                                { key: 'geofenceRadius', label: 'نطاق بصمة الجوال', render: b => (b.latitude !== undefined && b.latitude !== '' && b.latitude !== null)
+                                    ? `${A.numFmt(b.geofenceRadius || 150)} متر`
+                                    : '<span class="muted">غير محدد</span>' },
                                 { key: 'employees', label: 'الموظفون', align: 'left', render: b => A.numFmt((A.state.data.employees || []).filter(e => e.branchId === b.id).length) }
                             ],
                             rows: A.state.data.branches,
@@ -868,9 +897,37 @@
                 { key: 'address', label: 'العنوان', full: true },
                 { key: 'phone', label: 'الهاتف' },
                 { key: 'managerId', label: 'مدير الفرع', type: 'select', options: A.options.employees(), placeholder: '—' },
+                { key: 'latitude', label: 'خط العرض (Latitude)', type: 'number', step: 'any', help: 'موقع الفرع على الخريطة — مثال: 24.7136' },
+                { key: 'longitude', label: 'خط الطول (Longitude)', type: 'number', step: 'any', help: 'مثال: 46.6753' },
+                { type: 'html', html: `<div class="field full" style="margin-top:-4px">
+                    <label>تحديد موقع الفرع على الخريطة</label>
+                    <div id="branchMap"></div>
+                    <div class="help">اسحب الخريطة أو اضغط على المكان المطلوب لتُضبط خطوط الطول والعرض تلقائيًا.</div>
+                </div>` },
+                { key: 'geofenceRadius', label: 'نطاق البصمة من الجوال (متر)', type: 'number', default: 150, help: 'أقصى مسافة يُسمح بها لتسجيل البصمة من الجوال.' },
+                { key: 'mobilePunchEnabled', label: 'السماح بالبصمة من الجوال', type: 'checkbox', default: true },
                 { key: 'active', label: 'نشط', type: 'checkbox', default: true }
             ],
-            values: branch || { active: true },
+            values: branch || { active: true, geofenceRadius: 150, mobilePunchEnabled: true },
+            onOpen: (root, close, form) => {
+                const mapHost = root.querySelector('#branchMap');
+                if (!mapHost || !A.locationMap) return;
+                const latInput = form.querySelector('[name="latitude"]');
+                const lngInput = form.querySelector('[name="longitude"]');
+                const map = A.locationMap(mapHost, {
+                    lat: branch ? branch.latitude : '',
+                    lng: branch ? branch.longitude : '',
+                    onChange: (lat, lng) => {
+                        if (latInput) latInput.value = lat.toFixed(6);
+                        if (lngInput) lngInput.value = lng.toFixed(6);
+                    }
+                });
+                const follow = () => {
+                    if (map && latInput && lngInput && latInput.value !== '' && lngInput.value !== '') map.set(latInput.value, lngInput.value);
+                };
+                if (latInput) latInput.addEventListener('change', follow);
+                if (lngInput) lngInput.addEventListener('change', follow);
+            },
             onSubmit: async data => {
                 if (branch) await A.put('/collections/branches/' + branch.id, data);
                 else await A.post('/collections/branches', data);
@@ -1038,8 +1095,32 @@
                     present: rows.filter(r => ['present', 'late', 'missing_punch'].includes(r.status)).length,
                     absent: rows.filter(r => r.status === 'absent').length,
                     late: rows.filter(r => r.lateMinutes > 0).length,
-                    ot: rows.reduce((s, r) => s + A.num(r.overtimeMinutes), 0)
+                    ot: rows.reduce((s, r) => s + A.num(r.overtimeMinutes), 0),
+                    early: rows.reduce((s, r) => s + A.num(r.earlyMinutes), 0)
                 };
+                const dailyBase = [
+                    { key: 'date', label: 'التاريخ', render: r => A.date(r.date) },
+                    { key: 'employeeName', label: 'الموظف', render: r => `<strong>${h(r.employeeName)}</strong><br><span class="small muted">${h(A.deptName(r.departmentId))}</span>` },
+                    { key: 'shiftName', label: 'الدوام', render: r => r.shiftName ? h(r.shiftName) : '—' }
+                ];
+                const dailyTail = [
+                    { key: 'checkIn', label: 'الحضور', render: r => r.checkIn || '—' },
+                    { key: 'checkOut', label: 'الانصراف', render: r => r.checkOut || '—' },
+                    { key: 'lateMinutes', label: 'تأخير', align: 'left', render: r => r.lateMinutes ? `<span class="badge warning">${r.lateMinutes} د</span>` : '—' },
+                    { key: 'earlyMinutes', label: 'انصراف مبكر', align: 'left', render: r => r.earlyMinutes ? `${r.earlyMinutes} د` : '—' },
+                    { key: 'overtimeMinutes', label: 'إضافي', align: 'left', render: r => r.overtimeMinutes ? `<span class="badge success">${r.overtimeMinutes} د</span>` : '—' },
+                    { key: 'status', label: 'الحالة', render: r => A.badge(r.status) + (r.convertedToLeave ? ' <span class="badge purple">محوّل لإجازة</span>' : '') },
+                    { key: 'source', label: 'المصدر', render: r => r.source === 'correction' ? 'تصحيح' : r.source === 'leave' ? 'إجازة' : r.source === 'fingerprint' ? 'بصمة' : r.source === 'mobile' ? 'جوال' : 'النظام' }
+                ];
+                const dailyCols = [...dailyBase, ...periodCols, ...dailyTail];
+                const dayIndex = {};
+                dailyCols.forEach((c, i) => { dayIndex[c.key] = i; });
+                // صف الإجمالي في tfoot: يبقى ثابتًا أسفل الجدول ولا يتأثر بترتيب أي عمود
+                const dailyFooter = dailyCols.map((c, i) => ({ content: i === 0 ? 'الإجمالي' : '', align: c.align === 'left' ? 'left' : '' }));
+                dailyFooter[dayIndex.lateMinutes] = { content: A.numFmt(rows.reduce((s, r) => s + A.num(r.lateMinutes), 0)), align: 'left' };
+                dailyFooter[dayIndex.earlyMinutes] = { content: A.numFmt(summary.early), align: 'left' };
+                dailyFooter[dayIndex.overtimeMinutes] = { content: A.numFmt(summary.ot), align: 'left' };
+                dailyFooter.push({ content: '' });
                 pane.innerHTML = `
                     <div class="toolbar" style="padding:0 0 14px;border:0">
                         <input type="date" id="attFrom" value="${filters.from}"><span class="small muted">إلى</span><input type="date" id="attTo" value="${filters.to}">
@@ -1048,6 +1129,9 @@
                         <select id="attStatus"><option value="">كل الحالات</option>${['present', 'late', 'absent', 'leave', 'half_day', 'missing_punch'].map(s => `<option value="${s}" ${filters.status === s ? 'selected' : ''}>${A.statusLabel(s)}</option>`).join('')}</select>
                         <select id="attShift"><option value="">كل الدوامات</option>${A.options.shifts().map(o => `<option value="${h(o.value)}" ${filters.shiftId === o.value ? 'selected' : ''}>${h(o.label)}</option>`).join('')}</select>
                         <span class="grow"></span>
+                        <button class="btn btn-sm" id="attExcel">${A.icon('download')} Excel</button>
+                        <button class="btn btn-sm" id="attCsv">${A.icon('download')} CSV</button>
+                        <button class="btn btn-sm" id="attPdf">${A.icon('print')} طباعة / PDF</button>
                         ${A.can('attendance', 'edit') ? `<button class="btn btn-primary" id="attProcess">${A.icon('refresh')} معالجة الفترة</button><button class="btn" id="attConvert">${A.icon('exchange')} تحويل التأخير</button><button class="btn" id="attCorrect">${A.icon('plus')} معالجة بصمة</button>` : ''}
                     </div>
                     <div class="grid grid-4 mb">
@@ -1057,20 +1141,9 @@
                         ${kpiCard({ label: 'دقائق الإضافي', value: A.numFmt(summary.ot), icon: 'plus', tone: 'info' })}
                     </div>
                     ${A.table({
-                        columns: [
-                            { key: 'date', label: 'التاريخ', render: r => A.date(r.date) },
-                            { key: 'employeeName', label: 'الموظف', render: r => `<strong>${h(r.employeeName)}</strong><br><span class="small muted">${h(A.deptName(r.departmentId))}</span>` },
-                            { key: 'shiftName', label: 'الدوام', render: r => r.shiftName ? h(r.shiftName) : '—' },
-                            ...periodCols,
-                            { key: 'checkIn', label: 'الحضور', render: r => r.checkIn || '—' },
-                            { key: 'checkOut', label: 'الانصراف', render: r => r.checkOut || '—' },
-                            { key: 'lateMinutes', label: 'تأخير', align: 'left', render: r => r.lateMinutes ? `<span class="badge warning">${r.lateMinutes} د</span>` : '—' },
-                            { key: 'earlyMinutes', label: 'انصراف مبكر', align: 'left', render: r => r.earlyMinutes ? `${r.earlyMinutes} د` : '—' },
-                            { key: 'overtimeMinutes', label: 'إضافي', align: 'left', render: r => r.overtimeMinutes ? `<span class="badge success">${r.overtimeMinutes} د</span>` : '—' },
-                            { key: 'status', label: 'الحالة', render: r => A.badge(r.status) + (r.convertedToLeave ? ' <span class="badge purple">محوّل لإجازة</span>' : '') },
-                            { key: 'source', label: 'المصدر', render: r => r.source === 'correction' ? 'تصحيح' : r.source === 'leave' ? 'إجازة' : r.source === 'fingerprint' ? 'بصمة' : 'النظام' }
-                        ],
+                        columns: dailyCols,
                         rows,
+                        footer: dailyFooter,
                         actions: r => A.can('attendance', 'edit') ? [
                             { title: 'اعتبارها حاضر', icon: 'check', action: 'markPresent' },
                             { title: 'نصف يوم', icon: 'clock', action: 'markHalf' },
@@ -1106,6 +1179,27 @@
                     markHalf: id => quickCorrection(id, rows, 'half_day', renderDaily),
                     correct: id => { const row = rows.find(r => r.id === id); openCorrectionModal(row.empId, row.date, renderDaily); }
                 });
+                const printAttendance = () => A.printTable({
+                    title: 'سجل الحضور',
+                    subtitle: `${A.date(filters.from)} إلى ${A.date(filters.to)}`,
+                    landscape: true,
+                    filters: [
+                        filters.branchId ? { label: 'الفرع', value: A.branchName(filters.branchId) } : null,
+                        filters.employeeId ? { label: 'الموظف', value: A.employeeName(filters.employeeId) } : null,
+                        filters.status ? { label: 'الحالة', value: A.statusLabel(filters.status) } : null,
+                        filters.shiftId ? { label: 'الدوام', value: A.shiftName(filters.shiftId) } : null
+                    ].filter(Boolean),
+                    columns: [...dailyBase, ...dailyTail],
+                    rows
+                });
+                const exportAttendance = format => A.downloadPost(
+                    '/attendance/export',
+                    { kind: 'daily', filters, format },
+                    `attendance-daily.${format === 'csv' ? 'csv' : 'xlsx'}`
+                ).catch(err => A.toast(err.message, 'error'));
+                document.getElementById('attExcel').onclick = () => exportAttendance('xlsx');
+                document.getElementById('attCsv').onclick = () => exportAttendance('csv');
+                document.getElementById('attPdf').onclick = printAttendance;
             };
 
             const quickCorrection = async (id, rows, status, refresh) => {
@@ -1138,25 +1232,46 @@
                         typeLabel: r.checkOut ? 'دخول/خروج' : r.punchType === 1 ? 'خروج' : 'دخول'
                     };
                 }).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+                const punchCols = [
+                    { key: 'date', label: 'التاريخ', render: r => A.date(r.date) },
+                    { key: 'empName', label: 'الموظف' },
+                    { key: 'shiftName', label: 'الدوام', render: r => h(A.shiftName((A.employeeById(r.empId) || {}).shiftId)) },
+                    { key: 'checkIn', label: 'الحضور', render: r => r.checkIn ? String(r.checkIn).replace('T', ' ').slice(0, 16) : '—' },
+                    { key: 'checkOut', label: 'الانصراف', render: r => r.checkOut ? String(r.checkOut).replace('T', ' ').slice(0, 16) : '—' },
+                    { key: 'typeLabel', label: 'النوع' },
+                    { key: 'source', label: 'المصدر', render: r => A.badge(r.source === 'fingerprint' ? 'info' : r.source === 'mobile' ? 'success' : '', r.source === 'fingerprint' ? 'جهاز بصمة' : r.source === 'mobile' ? 'جوال' : r.source || 'يدوي') },
+                    { key: 'deviceId', label: 'الجهاز', render: r => h(r.deviceId || '—') }
+                ];
+                const punchFooter = punchCols.map((c, i) => ({ content: i === 0 ? 'الإجمالي' : '', align: '' }));
+                punchFooter[1] = { content: `${A.numFmt(rows.length)} بصمة`, align: '' };
                 pane.innerHTML = `
                     <div class="toolbar" style="padding:0 0 14px;border:0">
                         <input type="date" id="pFrom" value="${from}"><span class="small muted">إلى</span><input type="date" id="pTo" value="${to}">
                         <span class="grow"></span>
                         <span class="badge">${A.numFmt(rows.length)} بصمة</span>
+                        <button class="btn btn-sm" id="pExcel">${A.icon('download')} Excel</button>
+                        <button class="btn btn-sm" id="pCsv">${A.icon('download')} CSV</button>
+                        <button class="btn btn-sm" id="pPdf">${A.icon('print')} طباعة / PDF</button>
                         <button class="btn" id="pRefresh">${A.icon('refresh')} تحديث</button>
                     </div>
                     ${A.table({
-                        columns: [
-                            { key: 'date', label: 'التاريخ', render: r => A.date(r.date) },
-                            { key: 'empName', label: 'الموظف' },
-                            { key: 'shiftName', label: 'الدوام', render: r => h(A.shiftName((A.employeeById(r.empId) || {}).shiftId)) },
-                            { key: 'checkIn', label: 'الحضور', render: r => r.checkIn ? String(r.checkIn).replace('T', ' ').slice(0, 16) : '—' },
-                            { key: 'checkOut', label: 'الانصراف', render: r => r.checkOut ? String(r.checkOut).replace('T', ' ').slice(0, 16) : '—' },
-                            { key: 'typeLabel', label: 'النوع' },
-                            { key: 'source', label: 'المصدر', render: r => A.badge(r.source === 'fingerprint' ? 'info' : '', r.source === 'fingerprint' ? 'جهاز بصمة' : r.source || 'يدوي') },
-                            { key: 'deviceId', label: 'الجهاز', render: r => h(r.deviceId || '—') }
-                        ], rows, empty: 'لا توجد بصمات في الفترة المحددة'
+                        columns: punchCols, rows, footer: punchFooter, empty: 'لا توجد بصمات في الفترة المحددة'
                     })}`;
+                const exportPunches = format => A.downloadPost(
+                    '/attendance/export',
+                    { kind: 'punches', filters: { from, to }, format },
+                    `attendance-punches.${format === 'csv' ? 'csv' : 'xlsx'}`
+                ).catch(err => A.toast(err.message, 'error'));
+                const printPunches = () => A.printTable({
+                    title: 'سجل البصمات الخام',
+                    subtitle: `${A.date(from)} إلى ${A.date(to)}`,
+                    landscape: true,
+                    columns: punchCols,
+                    rows
+                });
+                document.getElementById('pExcel').onclick = () => exportPunches('xlsx');
+                document.getElementById('pCsv').onclick = () => exportPunches('csv');
+                document.getElementById('pPdf').onclick = printPunches;
                 document.getElementById('pRefresh').onclick = renderPunches;
                 ['pFrom', 'pTo'].forEach(id => { document.getElementById(id).onchange = () => { filters.from = document.getElementById('pFrom').value; filters.to = document.getElementById('pTo').value; renderPunches(); }; });
             };

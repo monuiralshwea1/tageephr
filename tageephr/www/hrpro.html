@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0070CC">
     <title>Tageep HRMS — نظام إدارة الموارد البشرية</title>
-    <link rel="stylesheet" href="/assets/tageephr/hrpro/assets/app.css?v=3.5.0">
+    <link rel="stylesheet" href="/assets/tageephr/hrpro/assets/app.css?v=3.6.0">
     <script>
         window.HRPRO_API_BASE = '/api/method/tageephr.hrpro.api.dispatch';
         window.HRPRO_CSRF = '{{ csrf_token }}';
@@ -177,6 +177,10 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
                         <input id="globalSearch" placeholder="بحث سريع عن موظف..." autocomplete="off">
                     </div>
+                    <button class="guide-shortcut" id="guideBtn" title="دليل استخدام النظام" aria-label="دليل استخدام النظام">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+                        <span>دليل الاستخدام</span>
+                    </button>
                     <button class="icon-btn" id="notifBtn" aria-label="الإشعارات">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 10-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
                         <span id="notifDot" class="dot hidden"></span>
@@ -219,11 +223,12 @@
             if (el) el.remove();
         }, 3700);
     </script>
-    <script src="/assets/tageephr/hrpro/assets/core.js?v=3.6.5"></script>
-    <script src="/assets/tageephr/hrpro/assets/modules-hr.js?v=3.5.0"></script>
+    <script src="/assets/tageephr/hrpro/assets/core.js?v=3.7.0"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-hr.js?v=3.6.0"></script>
     <script src="/assets/tageephr/hrpro/assets/modules-tasks.js?v=3.0.6"></script>
-    <script src="/assets/tageephr/hrpro/assets/modules-admin.js?v=3.6.1"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-admin.js?v=3.7.0"></script>
     <script src="/assets/tageephr/hrpro/assets/modules-accounts.js?v=3.3.2"></script>
+    <script src="/assets/tageephr/hrpro/assets/modules-guide.js?v=1.0.0"></script>
     <script src="/assets/tageephr/hrpro/assets/boot.js"></script>
 </body>
 </html>

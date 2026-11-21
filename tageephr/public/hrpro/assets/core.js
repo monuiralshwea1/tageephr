@@ -446,11 +446,27 @@
         if (!rows.length) {
             return `<div class="empty">${App.icon('file')}<div>${escapeHtml(empty || 'لا توجد بيانات لعرضها')}</div></div>`;
         }
-        const head = columns.map(c => `<th class="${c.align === 'left' ? 'num' : ''}" ${c.width ? `style="width:${c.width}"` : ''}>${escapeHtml(c.label)}</th>`).join('');
+        // كل عمود قابل للترتيب من رأسه ما دام له مفتاح بيانات (أو sortValue مخصّص).
+        // قيمة الترتيب تُحفظ في data-v (القيمة الخام وليست المنسّقة) حتى ترتّب التواريخ والأرقام صحيحًا.
+        const sortRaw = (c, row) => {
+            if (typeof c.sortValue === 'function') {
+                const v = c.sortValue(row);
+                return v === undefined || v === null ? '' : v;
+            }
+            const v = row[c.key];
+            return v === undefined || v === null ? '' : v;
+        };
+        const head = columns.map((c, index) => {
+            const sortable = c.sortable !== false && (c.key || typeof c.sortValue === 'function') && rows.length > 1;
+            const classes = `${c.align === 'left' ? 'num' : ''}${sortable ? ' sortable' : ''}`.trim();
+            return `<th class="${classes}" ${c.width ? `style="width:${c.width}"` : ''}${sortable ? ` data-sort-index="${index}" title="اضغط للترتيب تصاعديًا أو تنازليًا"` : ''}>${escapeHtml(c.label)}${sortable ? '<span class="sort-ind"></span>' : ''}</th>`;
+        }).join('');
         const body = rows.map((row, index) => {
             const cells = columns.map(c => {
                 const content = c.render ? c.render(row, index) : escapeHtml(row[c.key] === undefined || row[c.key] === null ? '' : row[c.key]);
-                return `<td class="${c.align === 'left' ? 'num' : ''} ${c.class || ''}">${content}</td>`;
+                const raw = sortRaw(c, row);
+                const sortText = raw !== null && typeof raw === 'object' ? '' : String(raw);
+                return `<td class="${c.align === 'left' ? 'num' : ''} ${c.class || ''}" data-v="${escapeHtml(sortText)}">${content}</td>`;
             }).join('');
             const actionList = typeof actions === 'function' ? actions(row, index) : actions;
             const actionsHtml = actionList && actionList.length
@@ -460,6 +476,7 @@
         }).join('');
         const foot = footer ? `<tfoot><tr>${footer.map(c => `<td class="${c.align === 'left' ? 'num' : ''}">${c.content}</td>`).join('')}</tr></tfoot>` : '';
         const table = `<div class="table-wrap"><table class="data"><thead><tr>${head}${actions ? '<th class="no-print"></th>' : ''}</tr></thead><tbody>${body}</tbody>${foot}</table></div>`;
+        if (rows.length > 1) setTimeout(() => App.bindTableSort(), 0);
         if (onRowClick) {
             setTimeout(() => {
                 document.querySelectorAll('#view tbody tr[data-id]').forEach(tr => {
@@ -474,6 +491,47 @@
             }, 0);
         }
         return table;
+    };
+
+    // ترتيب فوري داخل الصفحة (بدون طلب للسيرفر)، وصف الإجمالي في tfoot يبقى ثابتًا دائمًا.
+    App.bindTableSort = () => {
+        document.querySelectorAll('table.data th.sortable').forEach(th => {
+            if (th.dataset.sortBound) return;
+            th.dataset.sortBound = '1';
+            th.addEventListener('click', () => {
+                const table = th.closest('table');
+                const tbody = table && table.tBodies[0];
+                if (!tbody) return;
+                const index = Number(th.dataset.sortIndex);
+                const dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+                table.querySelectorAll('th.sortable').forEach(other => {
+                    other.classList.remove('sort-asc', 'sort-desc');
+                    delete other.dataset.dir;
+                });
+                th.dataset.dir = dir;
+                th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                const asNumber = text => {
+                    const clean = String(text === undefined || text === null ? '' : text).replace(/[\u066C,\s]/g, '').replace(/[^\d.+-]/g, '');
+                    return clean && /^[-+]?\d+(\.\d+)?$/.test(clean) ? parseFloat(clean) : null;
+                };
+                const cellValue = row => {
+                    const cell = row.cells[index];
+                    return cell ? (cell.dataset.v || '') : '';
+                };
+                const ordered = Array.from(tbody.rows);
+                ordered.sort((a, b) => {
+                    const av = cellValue(a), bv = cellValue(b);
+                    const an = asNumber(av), bn = asNumber(bv);
+                    let cmp;
+                    if (an !== null && bn !== null) cmp = an - bn;
+                    else if (!av && bv) cmp = 1;
+                    else if (av && !bv) cmp = -1;
+                    else cmp = String(av).localeCompare(String(bv), 'ar', { numeric: true, sensitivity: 'base' });
+                    return dir === 'asc' ? cmp : -cmp;
+                });
+                ordered.forEach(row => tbody.appendChild(row));
+            });
+        });
     };
 
     App.bindActions = handlers => {
@@ -559,12 +617,16 @@
 
     // ───────────── قوائم منسدلة قابلة للبحث ─────────────
     let searchSelect = null;
+    let searchSelectBackdrop = null;
     const closeSearchSelect = () => {
+        if (searchSelectBackdrop) { searchSelectBackdrop.remove(); searchSelectBackdrop = null; }
+        document.body.classList.remove('ss-lock');
         if (!searchSelect) return;
         searchSelect.pop.remove();
         searchSelect.trigger.classList.remove('ss-open');
         searchSelect = null;
     };
+    App.closeSearchSelect = closeSearchSelect;
     document.addEventListener('click', e => {
         if (searchSelect && !e.target.closest('.ss-pop') && !e.target.closest('.ss-trigger')) closeSearchSelect();
     });
@@ -577,11 +639,24 @@
         const pop = document.createElement('div');
         pop.className = 'ss-pop';
         pop.style.width = width + 'px';
+        // على الجوال تُفتح القائمة كورقة سفلية بعرض الشاشة مع خلفية معتمة (أسهل للمس والبحث)
+        const isSheet = window.matchMedia('(max-width: 720px), (pointer: coarse)').matches;
         pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
-        pop.innerHTML = `<div class="ss-pop-head"><input type="text" class="ss-input" placeholder="ابحث في القائمة..." autocomplete="off"></div><div class="ss-list"></div>`;
+        pop.innerHTML = `<div class="ss-pop-head"><input type="text" class="ss-input" inputmode="search" placeholder="ابحث في القائمة..." autocomplete="off"><button type="button" class="ss-close" aria-label="إغلاق">&times;</button></div><div class="ss-list"></div>`;
         document.body.appendChild(pop);
-        if (window.innerHeight - rect.bottom < 240 && rect.top > 260) pop.style.top = Math.max(8, rect.top - Math.min(320, rect.top - 8) - 4) + 'px';
-        else pop.style.top = (rect.bottom + 4) + 'px';
+        if (isSheet) {
+            pop.classList.add('ss-sheet');
+            searchSelectBackdrop = document.createElement('div');
+            searchSelectBackdrop.className = 'ss-backdrop';
+            document.body.appendChild(searchSelectBackdrop);
+            searchSelectBackdrop.addEventListener('click', closeSearchSelect);
+            document.body.classList.add('ss-lock');
+        } else if (window.innerHeight - rect.bottom < 240 && rect.top > 260) {
+            pop.style.top = Math.max(8, rect.top - Math.min(320, rect.top - 8) - 4) + 'px';
+        } else {
+            pop.style.top = (rect.bottom + 4) + 'px';
+        }
+        pop.querySelector('.ss-close').addEventListener('click', e => { e.preventDefault(); closeSearchSelect(); });
 
         const items = Array.from(inst.select.options).map(option => {
             const group = option.parentElement && option.parentElement.tagName === 'OPTGROUP' ? option.parentElement.label : '';
@@ -612,7 +687,17 @@
             active = Math.max(0, Math.min(active, filtered.length - 1));
             list.innerHTML = filtered.map((item, i) => `<button type="button" class="ss-option ${i === active ? 'active' : ''} ${item.option.selected ? 'selected' : ''}" data-index="${i}">${escapeHtml(item.text)}</button>`).join('');
             list.querySelectorAll('.ss-option').forEach(btn => {
+                // pointerdown للمس السريع، وclick للأجهزة التي لا تُطلق pointerdown
+                btn.addEventListener('pointerdown', e => {
+                    if (e.pointerType === 'mouse') return;
+                    e.preventDefault();
+                    pick(filtered[parseInt(btn.dataset.index, 10)]);
+                });
                 btn.onmousedown = e => { e.preventDefault(); pick(filtered[parseInt(btn.dataset.index, 10)]); };
+                btn.addEventListener('click', e => {
+                    if (isSheet) return;
+                    e.preventDefault();
+                });
             });
         };
         input.addEventListener('input', () => { active = 0; paint(); });
@@ -625,7 +710,8 @@
         paint();
         inst.trigger.classList.add('ss-open');
         searchSelect = { ...inst, pop };
-        setTimeout(() => input.focus(), 0);
+        // لا نفتح لوحة المفاتيح تلقائيًا على الجوال حتى لا تُغلق القائمة أو تُغطى النتائج
+        if (!isSheet) setTimeout(() => { try { input.focus(); } catch (_) {} }, 30);
     }
 
     function enhanceSelect(select) {
@@ -669,6 +755,104 @@
         if (scope.tagName === 'SELECT') enhanceSelect(scope);
     };
 
+    // ───────────── خريطة صغيرة لتحديد موقع الفرع ─────────────
+    App.locationMap = (host, options = {}) => {
+        if (!host) return null;
+        const TILE = 256;
+        const clampLat = lat => Math.max(-85, Math.min(85, lat));
+        let center = { lat: Number(options.lat) || 24.7136, lng: Number(options.lng) || 46.6753 };
+        let zoom = Number(options.zoom) || 16;
+        host.innerHTML = `<div class="lm">
+            <div class="lm-tiles"></div>
+            <span class="lm-cross" aria-hidden="true">📍</span>
+            <div class="lm-ctl">
+                <button type="button" data-z="in" title="تكبير">+</button>
+                <button type="button" data-z="out" title="تصغير">−</button>
+                <button type="button" data-z="me" title="موقعي الحالي">موقعي</button>
+            </div>
+            <div class="lm-coords" dir="ltr"></div>
+            <div class="lm-attrib">© OpenStreetMap</div>
+        </div>`;
+        const lm = host.querySelector('.lm');
+        const tiles = host.querySelector('.lm-tiles');
+        const coords = host.querySelector('.lm-coords');
+        const project = (lat, lng, z) => {
+            const scale = TILE * Math.pow(2, z);
+            const s = Math.sin(lat * Math.PI / 180);
+            return { x: (lng + 180) / 360 * scale, y: (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * scale };
+        };
+        const unproject = (x, y, z) => {
+            const scale = TILE * Math.pow(2, z);
+            const n = Math.PI - 2 * Math.PI * y / scale;
+            return { lat: 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n))), lng: x / scale * 360 - 180 };
+        };
+        const emit = () => { if (options.onChange) options.onChange(center.lat, center.lng); };
+        const render = () => {
+            const w = lm.clientWidth || 320, h = lm.clientHeight || 220;
+            const c = project(center.lat, center.lng, zoom);
+            const ox = c.x - w / 2, oy = c.y - h / 2;
+            const max = Math.pow(2, zoom);
+            const x0 = Math.floor(ox / TILE), x1 = Math.floor((ox + w) / TILE);
+            const y0 = Math.max(0, Math.floor(oy / TILE)), y1 = Math.min(max - 1, Math.floor((oy + h) / TILE));
+            let html = '';
+            for (let tx = x0; tx <= x1; tx++) {
+                for (let ty = y0; ty <= y1; ty++) {
+                    const wx = ((tx % max) + max) % max;
+                    html += `<img src="https://tile.openstreetmap.org/${zoom}/${wx}/${ty}.png" alt="" draggable="false" style="left:${Math.round(tx * TILE - ox)}px;top:${Math.round(ty * TILE - oy)}px">`;
+                }
+            }
+            tiles.innerHTML = html;
+            coords.textContent = center.lat.toFixed(6) + ', ' + center.lng.toFixed(6);
+        };
+        let drag = null;
+        lm.addEventListener('pointerdown', e => {
+            if (e.target.closest('.lm-ctl')) return;
+            drag = { x: e.clientX, y: e.clientY, moved: false, c: project(center.lat, center.lng, zoom) };
+            try { lm.setPointerCapture(e.pointerId); } catch (_) {}
+        });
+        lm.addEventListener('pointermove', e => {
+            if (!drag) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+            const p = unproject(drag.c.x - dx, drag.c.y - dy, zoom);
+            center = { lat: clampLat(p.lat), lng: p.lng };
+            render();
+        });
+        const finish = e => {
+            if (!drag) return;
+            const wasDrag = drag.moved;
+            const base = drag.c;
+            drag = null;
+            if (wasDrag) { emit(); return; }
+            const rect = lm.getBoundingClientRect();
+            const p = unproject(base.x + (e.clientX - rect.left - rect.width / 2), base.y + (e.clientY - rect.top - rect.height / 2), zoom);
+            center = { lat: clampLat(p.lat), lng: p.lng };
+            render(); emit();
+        };
+        lm.addEventListener('pointerup', finish);
+        lm.addEventListener('pointercancel', () => { drag = null; });
+        host.querySelectorAll('.lm-ctl button').forEach(btn => btn.addEventListener('click', e => {
+            e.preventDefault();
+            if (btn.dataset.z === 'in') zoom = Math.min(19, zoom + 1);
+            else if (btn.dataset.z === 'out') zoom = Math.max(3, zoom - 1);
+            else {
+                if (!navigator.geolocation) return App.toast('جهازك لا يدعم تحديد الموقع', 'error');
+                navigator.geolocation.getCurrentPosition(pos => {
+                    center = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                    zoom = 17; render(); emit(); App.toast('تم تحديد موقعك على الخريطة');
+                }, () => App.toast('تعذر قراءة موقعك — اسمح بالوصول إلى الموقع', 'error'), { enableHighAccuracy: true, timeout: 15000 });
+                return;
+            }
+            render();
+        }));
+        render();
+        requestAnimationFrame(render);
+        if (window.ResizeObserver) {
+            try { new ResizeObserver(() => render()).observe(lm); } catch (_) {}
+        }
+        return { render, set: (lat, lng) => { center = { lat: Number(lat) || center.lat, lng: Number(lng) || center.lng }; render(); } };
+    };
+
     App.can = (module, action = 'view') => {
         const user = App.state.user;
         if (!user) return false;
@@ -706,7 +890,9 @@
         const accessible = App.routes.filter(r => !r.hidden && (!r.permission || App.can(r.permission, 'view')));
         App.tabs = App.tabs.filter(t => accessible.some(r => r.path === t.path));
         if (!App.tabs.length) {
-            const first = accessible.find(r => r.path === 'dashboard') || accessible[0];
+            const first = accessible.find(r => r.path === 'dashboard')
+                || accessible.find(r => r.path === 'self')
+                || accessible[0];
             if (first) App.tabs.push({ path: first.path, label: first.label });
         }
         bar.innerHTML = App.tabs.map(t => `<div class="tab-item ${t.path === App.activeTab ? 'active' : ''}" data-tab="${escapeHtml(t.path)}" role="tab" tabindex="0">
@@ -727,7 +913,13 @@
         if (index < 0) return;
         const wasActive = App.activeTab === path;
         App.tabs.splice(index, 1);
-        if (!App.tabs.length) App.tabs.push({ path: 'dashboard', label: 'لوحة المعلومات' });
+        if (!App.tabs.length) {
+            const accessible = App.routes.filter(r => !r.hidden && (!r.permission || App.can(r.permission, 'view')));
+            const first = accessible.find(r => r.path === 'dashboard')
+                || accessible.find(r => r.path === 'self')
+                || accessible[0];
+            if (first) App.tabs.push({ path: first.path, label: first.label });
+        }
         App.saveTabs();
         if (wasActive) {
             const next = App.tabs[Math.max(0, index - 1)] || App.tabs[0];
@@ -811,6 +1003,7 @@
         const accessible = App.routes.filter(r => !r.permission || App.can(r.permission, 'view'));
         const route = App.routes.find(r => r.path === pathPart)
             || accessible.find(r => r.path === 'dashboard')
+            || accessible.find(r => r.path === 'self')
             || accessible[0] || App.routes[0];
         if (!route) return;
         App.currentRoute = route;
@@ -820,7 +1013,7 @@
         document.getElementById('pageTitle').textContent = route.label;
         document.getElementById('pageSubtitle').textContent = route.subtitle || '';
         document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.path === route.path));
-        document.getElementById('sidebar').classList.remove('open');
+        if (App.toggleSidebar) App.toggleSidebar(false); else document.getElementById('sidebar').classList.remove('open');
         if (!module) { view.innerHTML = `<div class="empty">الوحدة غير متاحة</div>`; return; }
         if (route.permission && !App.can(route.permission, 'view')) {
             view.innerHTML = `<div class="alert danger">${App.icon('lock')}<div>لا تملك صلاحية الوصول إلى هذه الوحدة. تواصل مع مدير النظام.</div></div>`;
@@ -1381,12 +1574,34 @@
                 App.toast('تم فحص الإشعارات الذكية');
             } catch (err) { App.toast(err.message, 'error'); }
         });
-        document.getElementById('menuToggle').addEventListener('click', () => document.getElementById('sidebar').classList.toggle('open'));
+        // القائمة الجانبية: درج منزلق على الجوال + زر توسيع/تصغير ظاهر دائمًا
+        const sidebarEl = document.getElementById('sidebar');
+        const sidebarBackdrop = document.createElement('div');
+        sidebarBackdrop.className = 'sidebar-backdrop';
+        document.body.appendChild(sidebarBackdrop);
+        const isMobileView = () => window.matchMedia('(max-width: 1024px)').matches;
+        App.toggleSidebar = force => {
+            const next = force === undefined ? !sidebarEl.classList.contains('open') : !!force;
+            sidebarEl.classList.toggle('open', next);
+            sidebarBackdrop.classList.toggle('show', next && isMobileView());
+            document.body.classList.toggle('sb-lock', next && isMobileView());
+        };
+        sidebarBackdrop.addEventListener('click', () => App.toggleSidebar(false));
+        const sidebarClose = document.createElement('button');
+        sidebarClose.type = 'button';
+        sidebarClose.className = 'sidebar-close';
+        sidebarClose.setAttribute('aria-label', 'إغلاق القائمة');
+        sidebarClose.innerHTML = '&times;';
+        sidebarClose.addEventListener('click', () => App.toggleSidebar(false));
+        sidebarEl.appendChild(sidebarClose);
+        document.getElementById('menuToggle').addEventListener('click', () => App.toggleSidebar());
         document.getElementById('collapseBtn').addEventListener('click', () => {
+            if (isMobileView()) { App.toggleSidebar(); return; }
             const shell = document.getElementById('shell');
             shell.classList.toggle('collapsed');
             localStorage.setItem('tageep_sidebar_collapsed', shell.classList.contains('collapsed') ? '1' : '0');
         });
+        window.addEventListener('resize', () => { if (!isMobileView()) App.toggleSidebar(false); });
         document.getElementById('themeBtn').addEventListener('click', () => {
             document.body.classList.toggle('dark');
             localStorage.setItem('tageep_theme', document.body.classList.contains('dark') ? 'dark' : 'light');
@@ -1428,10 +1643,17 @@
             clearTimeout(ssTimer);
             ssTimer = setTimeout(() => App.enhanceSelects(document), 40);
         }).observe(document.body, { childList: true, subtree: true });
-        window.addEventListener('resize', () => closeSearchSelect());
+        // لا تُغلق القائمة عند فتح لوحة مفاتيح الجوال (تغيير الارتفاع فقط) — تُغلق عند تغيّر العرض
+        let lastWinWidth = window.innerWidth;
+        window.addEventListener('resize', () => {
+            if (Math.abs(window.innerWidth - lastWinWidth) > 60) closeSearchSelect();
+            lastWinWidth = window.innerWidth;
+        });
         window.addEventListener('scroll', e => {
             if (e.target && e.target.closest && e.target.closest('.ss-pop')) return;
-            if (searchSelect) closeSearchSelect();
+            if (!searchSelect) return;
+            if (searchSelect.pop && searchSelect.pop.classList.contains('ss-sheet')) return;
+            closeSearchSelect();
         }, true);
         App.start();
     });

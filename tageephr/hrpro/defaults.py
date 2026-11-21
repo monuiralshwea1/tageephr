@@ -20,6 +20,7 @@ COLLECTIONS = [
 	"eosSettlements", "approvalRequests",
 	"tasks", "taskComments", "selfRequests",
 	"employeeTransfers", "employeePromotions", "fingerprintCommands",
+	"selfCredentials",
 	"accounts", "vouchers",
 ]
 

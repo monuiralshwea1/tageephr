@@ -1,7 +1,10 @@
 """واجهة نظام Tageep HRMS داخل الفرابي — ترجمة لمسارات hrpro/src/api.js."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -318,8 +321,10 @@ def auth_change_password(ctx):
 def bootstrap(ctx):
 	s = ctx.state
 	user = ctx.user
-	can_view_employees = has_permission(user, "employees", "view") or has_permission(user, "self", "view")
 	preset = ROLE_PRESETS.get(user.get("role")) or {}
+	self_only = bool(preset.get("selfOnly"))
+	# دور الخدمة الذاتية (employee) يرى ملفه هو فقط، وليس كل موظفي فرعه
+	can_view_employees = has_permission(user, "employees", "view") or (has_permission(user, "self", "view") and not self_only)
 	branch_id = None if user.get("role") == "admin" else ((user.get("branchId") if preset.get("branchScoped") else None) or None)
 	employees = [e for e in s.get("employees") or [] if can_view_employees and (not branch_id or e.get("branchId") == branch_id)]
 	self_emps = [e for e in s.get("employees") or [] if has_permission(user, "self", "view") and user.get("employeeId") and e.get("id") == user["employeeId"]]
@@ -330,7 +335,9 @@ def bootstrap(ctx):
 	return {
 		"user": sanitize_user(user), "modules": MODULES, "roles": ROLE_PRESETS,
 		"permissions": user_permissions(user), "branchScope": branch_id,
-		"settings": s.get("settings"), "branches": s.get("branches"), "departments": s.get("departments"),
+		"settings": ({k: v for k, v in (s.get("settings") or {}).items() if k != "fingerprintDevice"}
+		             if not has_permission(user, "attendance", "view") else s.get("settings")),
+		"branches": s.get("branches"), "departments": s.get("departments"),
 		"jobGrades": s.get("jobGrades"), "workShifts": s.get("workShifts"), "holidays": s.get("holidays"),
 		"leaveTypes": s.get("leaveTypes"), "leavePolicy": s.get("leavePolicy"),
 		"payrollSettings": s.get("payrollSettings"), "documentTypes": s.get("documentTypes"),
@@ -481,7 +488,7 @@ def employee_next_number(ctx):
 
 
 # ═════════ نقل الموظفين والترقيات ═════════
-TRANSFER_FIELDS = ("branchId", "departmentId", "jobTitle", "jobGradeId", "shiftId", "managerId")
+TRANSFER_FIELDS = ("branchId", "departmentId", "jobTitle")
 PROMOTION_TYPES = {
 	"promotion": "ترقية", "salary": "زيادة راتب", "allowance": "زيادة بدل",
 	"grade": "تغيير رتبة", "position": "تغيير مسمى وظيفي", "mixed": "ترقية وزيادة",
@@ -570,8 +577,6 @@ def employee_transfer(ctx, emp_id):
 		"fromDepartmentId": before["departmentId"], "fromDepartmentName": _dept_label(s, before["departmentId"]),
 		"toDepartmentId": emp.get("departmentId") or "", "toDepartmentName": _dept_label(s, emp.get("departmentId")),
 		"fromJobTitle": before["jobTitle"], "toJobTitle": emp.get("jobTitle") or "",
-		"fromShiftId": before["shiftId"], "toShiftId": emp.get("shiftId") or "",
-		"fromManagerId": before["managerId"], "toManagerId": emp.get("managerId") or "",
 		"effectiveDate": effective, "reason": body.get("reason") or "", "notes": body.get("notes") or "",
 		"status": "applied", "fingerprint": {"status": "disabled", "message": "لم تُطلب مزامنة البصمة"},
 		"createdAt": engine._now(), "createdBy": ctx.user.get("name") or "",
@@ -722,11 +727,102 @@ def attendance_daily(ctx):
 	if preset.get("branchScoped") and ctx.user.get("branchId"):
 		rows = [r for r in rows if can_access_branch(ctx.user, r.get("branchId"))]
 	if q.get("shiftId"):
+		# خريطة واحدة بدل البحث في كل الموظفين لكل صف (أسرع مع الجداول الكبيرة)
+		shift_by_emp = {e.get("id"): e.get("shiftId") for e in ctx.state.get("employees") or []}
 		rows = [r for r in rows if r.get("shiftId") == q.get("shiftId")
-		        or ((engine.find_employee(ctx.state, r.get("empId")) or {}).get("shiftId") == q.get("shiftId"))]
+		        or shift_by_emp.get(r.get("empId")) == q.get("shiftId")]
 	rows.sort(key=lambda r: (r.get("date", ""), r.get("employeeName", "")))
 	rows = engine.attach_shift_periods(ctx.state, rows, frm, to)
 	return {"data": rows, "from": frm, "to": to}
+
+
+ATTENDANCE_STATUS_LABELS = {
+	"present": "حاضر", "late": "متأخر", "absent": "غائب", "leave": "إجازة",
+	"half_day": "نصف يوم", "missing_punch": "بصمة ناقصة", "weekend": "عطلة أسبوعية",
+	"holiday": "عطلة رسمية", "remote": "عمل عن بعد", "future": "لم يحن", "not_tracked": "غير متتبع",
+}
+ATTENDANCE_SOURCE_LABELS = {"fingerprint": "جهاز بصمة", "mobile": "جوال", "correction": "تصحيح", "leave": "إجازة"}
+
+
+@route("POST", r"/attendance/export", permission=("attendance", "view"))
+def attendance_export(ctx):
+	"""تصدير جداول الحضور والبصمات إلى Excel/CSV بنفس أعمدة الشاشة."""
+	state = ctx.state
+	body = ctx.body or {}
+	filters = body.get("filters") or {}
+	kind = "punches" if body.get("kind") == "punches" else "daily"
+	frm = date_only(filters.get("from")) or today_iso()
+	to = date_only(filters.get("to")) or frm
+	branches = {b.get("id"): b.get("name") for b in state.get("branches") or []}
+	departments = {d.get("id"): d.get("name") for d in state.get("departments") or []}
+	employee_names = {e.get("id"): e.get("name") for e in state.get("employees") or []}
+	shift_by_emp = {e.get("id"): e.get("shiftId") for e in state.get("employees") or []}
+	preset = ROLE_PRESETS.get(ctx.user.get("role")) or {}
+	scoped = preset.get("branchScoped") and ctx.user.get("branchId")
+
+	if kind == "punches":
+		rows = []
+		for rec in state.get("attendanceRecords") or []:
+			day = date_only(rec.get("date"))
+			if not day or day < frm or day > to:
+				continue
+			if filters.get("employeeId") and rec.get("empId") != filters["employeeId"]:
+				continue
+			if filters.get("branchId") and rec.get("branchId") != filters["branchId"]:
+				continue
+			if scoped and rec.get("branchId") and rec.get("branchId") != ctx.user.get("branchId"):
+				continue
+			location = ""
+			if rec.get("latitude") is not None and rec.get("longitude") is not None:
+				location = "%s, %s" % (rec.get("latitude"), rec.get("longitude"))
+			rows.append({
+				"date": day, "employee": rec.get("employeeName") or employee_names.get(rec.get("empId")) or "",
+				"branch": branches.get(rec.get("branchId"), ""), "checkIn": rec.get("checkIn") or rec.get("punchTime") or "",
+				"checkOut": rec.get("checkOut") or "",
+				"type": "خروج" if str(rec.get("punchType")) == "1" else "دخول",
+				"source": ATTENDANCE_SOURCE_LABELS.get(rec.get("source"), rec.get("source") or "يدوي"),
+				"device": rec.get("deviceId") or "", "location": location,
+			})
+		rows.sort(key=lambda r: (r["date"], r["employee"], r["checkIn"]))
+		title = "سجل البصمات الخام"
+		columns = [{"key": "date", "label": "التاريخ"}, {"key": "employee", "label": "الموظف"},
+		           {"key": "branch", "label": "الفرع"}, {"key": "checkIn", "label": "وقت البصمة"},
+		           {"key": "checkOut", "label": "الانصراف"}, {"key": "type", "label": "النوع"},
+		           {"key": "source", "label": "المصدر"}, {"key": "device", "label": "الجهاز"},
+		           {"key": "location", "label": "الموقع"}]
+	else:
+		rows = engine.attendance_for(state, frm, to, {
+			"employeeId": filters.get("employeeId"), "branchId": filters.get("branchId"),
+			"departmentId": filters.get("departmentId"), "status": filters.get("status")})
+		if scoped:
+			rows = [r for r in rows if can_access_branch(ctx.user, r.get("branchId"))]
+		if filters.get("shiftId"):
+			rows = [r for r in rows if r.get("shiftId") == filters["shiftId"]
+			        or shift_by_emp.get(r.get("empId")) == filters["shiftId"]]
+		rows = engine.attach_shift_periods(state, rows, frm, to)
+		rows.sort(key=lambda r: (r.get("date", ""), r.get("employeeName", "")))
+		rows = [{
+			"date": r.get("date"), "employee": r.get("employeeName") or "",
+			"department": departments.get(r.get("departmentId"), ""), "branch": branches.get(r.get("branchId"), ""),
+			"shift": r.get("shiftName") or "", "checkIn": r.get("checkIn") or "", "checkOut": r.get("checkOut") or "",
+			"late": num(r.get("lateMinutes")), "early": num(r.get("earlyMinutes")), "overtime": num(r.get("overtimeMinutes")),
+			"status": ATTENDANCE_STATUS_LABELS.get(r.get("status"), r.get("status") or ""),
+			"source": ATTENDANCE_SOURCE_LABELS.get(r.get("source"), r.get("source") or ""),
+		} for r in rows]
+		title = "سجل الحضور"
+		columns = [{"key": "date", "label": "التاريخ"}, {"key": "employee", "label": "الموظف"},
+		           {"key": "department", "label": "القسم"}, {"key": "branch", "label": "الفرع"},
+		           {"key": "shift", "label": "الدوام"}, {"key": "checkIn", "label": "الحضور"},
+		           {"key": "checkOut", "label": "الانصراف"}, {"key": "late", "label": "تأخير (د)"},
+		           {"key": "early", "label": "انصراف مبكر (د)"}, {"key": "overtime", "label": "إضافي (د)"},
+		           {"key": "status", "label": "الحالة"}, {"key": "source", "label": "المصدر"}]
+
+	if not rows:
+		raise ApiError("لا توجد بيانات للتصدير في الفترة المحددة")
+	stamp = time.strftime("%Y%m%d-%H%M%S")
+	if str(body.get("format") or "xlsx").lower() in ("xlsx", "excel"):
+		return _download(files.build_xlsx(columns, rows, title), "attendance-%s-%s.xlsx" % (kind, stamp))
+	return _download(files.build_csv(columns, rows), "attendance-%s-%s.csv" % (kind, stamp))
 
 
 @route("POST", r"/attendance/corrections", permission=("attendance", "add"))
@@ -1744,6 +1840,479 @@ def self_overview(ctx):
 	}}
 
 
+# ═════════ بصمة الجوال بنطاق الفرع (الخدمة الذاتية) ═════════
+def _haversine_meters(lat1, lon1, lat2, lon2):
+	from math import asin, cos, radians, sin, sqrt
+	lat1, lon1, lat2, lon2 = map(radians, (float(lat1), float(lon1), float(lat2), float(lon2)))
+	dlat, dlon = lat2 - lat1, lon2 - lon1
+	a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+	return 6371000.0 * 2 * asin(sqrt(a))
+
+
+def _branch_geo(state, branch_id):
+	branch = next((b for b in state.get("branches") or [] if b.get("id") == branch_id), None)
+	if not branch:
+		return None, {"enabled": False, "reason": "لم يُحدَّد فرع للموظف"}
+	try:
+		lat = float(branch.get("latitude"))
+	except (TypeError, ValueError):
+		lat = None
+	try:
+		lng = float(branch.get("longitude"))
+	except (TypeError, ValueError):
+		lng = None
+	radius = max(30.0, min(5000.0, num(branch.get("geofenceRadius"), 150) or 150))
+	enabled = branch.get("mobilePunchEnabled") is not False and lat is not None and lng is not None
+	reason = ""
+	if lat is None or lng is None:
+		reason = "لم تُحدَّد إحداثيات موقع الفرع — اطلب من الموارد البشرية ضبط خط الطول والعرض"
+	elif branch.get("mobilePunchEnabled") is False:
+		reason = "البصمة من الجوال معطّلة لهذا الفرع"
+	return branch, {"latitude": lat, "longitude": lng, "radius": radius, "enabled": enabled, "reason": reason}
+
+
+def _self_punch_records(state, emp_id, day):
+	return sorted([r for r in state.get("attendanceRecords") or []
+	               if (r.get("empId") or r.get("employeeId")) == emp_id and date_only(r.get("date")) == day],
+	              key=lambda r: str(r.get("punchTime") or r.get("checkIn") or ""))
+
+
+def _self_next_punch(state, emp, records, day=None):
+	"""نوع البصمة التالية من أوقات الدخول والخروج الفعلية، لا من عدد السجلات."""
+	day = day or today_iso()
+	daily = next((d for d in state.get("attendanceDaily") or []
+	              if d.get("empId") == emp.get("id") and d.get("date") == day), None) or {}
+	last = records[-1] if records else None
+	if last:
+		punch_type = str(last.get("punchType") if last.get("punchType") is not None else "")
+		last_in = last.get("checkIn") or ""
+		last_out = last.get("checkOut") or ""
+		if not last_in and not last_out:
+			last_in = last.get("punchTime") or ""
+		# بصمة صنّفها الجهاز أو النظام صراحةً كخروج
+		if punch_type == "1" or (last_out and not last_in):
+			return "in"
+		# آخر بصمة دخول بلا انصراف ⇒ التالية انصراف
+		if last_in and not last_out:
+			return "out"
+		if last_in and last_out:
+			return "out" if str(last_out) <= str(last_in) else "in"
+	# لا سجلات خام: اعتمد على سجل الحضور اليومي إن وُجد
+	if daily.get("checkIn") and not daily.get("checkOut"):
+		return "out"
+	if daily.get("checkOut") and not daily.get("checkIn"):
+		return "in"
+	return "in"
+
+
+def _self_credential(state, emp_id):
+	return next((c for c in state.get("selfCredentials") or []
+	             if c.get("employeeId") == emp_id and c.get("credentialId")), None)
+
+
+def _biometric_required(state):
+	return (state.get("settings") or {}).get("mobilePunchBiometric") is not False
+
+
+# ── التحقق من بصمة جهاز الموظف (WebAuthn / Passkey) ──
+def _b64url_decode(value):
+	text = str(value or "").strip()
+	if not text:
+		return b""
+	if len(text) % 4:
+		text += "=" * (4 - len(text) % 4)
+	return base64.urlsafe_b64decode(text.encode("ascii"))
+
+
+def _b64url_encode(data):
+	return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _cbor_decode(data, offset=0):
+	"""مفكّك CBOR مصغّر يكفي لقراءة مفتاح COSE من رد تسجيل WebAuthn."""
+	head = data[offset]
+	offset += 1
+	major, info = head >> 5, head & 0x1F
+	if info < 24:
+		value = info
+	elif info == 24:
+		value = data[offset]
+		offset += 1
+	elif info == 25:
+		value = int.from_bytes(data[offset:offset + 2], "big")
+		offset += 2
+	elif info == 26:
+		value = int.from_bytes(data[offset:offset + 4], "big")
+		offset += 4
+	elif info == 27:
+		value = int.from_bytes(data[offset:offset + 8], "big")
+		offset += 8
+	else:
+		raise ApiError("بيانات البصمة غير مفهومة")
+	if major == 0:
+		return value, offset
+	if major == 1:
+		return -1 - value, offset
+	if major == 2:
+		return data[offset:offset + value], offset + value
+	if major == 3:
+		return data[offset:offset + value].decode("utf-8", "replace"), offset + value
+	if major == 4:
+		items = []
+		for _ in range(value):
+			item, offset = _cbor_decode(data, offset)
+			items.append(item)
+		return items, offset
+	if major == 5:
+		out = {}
+		for _ in range(value):
+			key, offset = _cbor_decode(data, offset)
+			val, offset = _cbor_decode(data, offset)
+			out[key] = val
+		return out, offset
+	if major == 6:
+		return _cbor_decode(data, offset)
+	if major == 7:
+		if info == 20:
+			return False, offset
+		if info == 21:
+			return True, offset
+		return None, offset
+	raise ApiError("بيانات البصمة غير مفهومة")
+
+
+def _cose_public_key(cose):
+	from cryptography.hazmat.primitives.asymmetric import ec, rsa
+	if not isinstance(cose, dict):
+		raise ApiError("مفتاح بصمة الجوال غير صالح")
+	kty = cose.get(1)
+	if kty == 2:
+		if cose.get(-1) != 1:
+			raise ApiError("منحنى مفتاح البصمة غير مدعوم")
+		x, y = cose.get(-2), cose.get(-3)
+		if not isinstance(x, bytes) or not isinstance(y, bytes):
+			raise ApiError("مفتاح بصمة الجوال غير صالح")
+		return ec.EllipticCurvePublicNumbers(int.from_bytes(x, "big"), int.from_bytes(y, "big"),
+		                                     ec.SECP256R1()).public_key()
+	if kty == 3:
+		n, e = cose.get(-1), cose.get(-2)
+		if not isinstance(n, bytes) or not isinstance(e, bytes):
+			raise ApiError("مفتاح بصمة الجوال غير صالح")
+		return rsa.RSAPublicNumbers(int.from_bytes(e, "big"), int.from_bytes(n, "big")).public_key()
+	raise ApiError("نوع مفتاح بصمة الجوال غير مدعوم")
+
+
+def _verify_signature(public_key, signature, signed):
+	from cryptography.exceptions import InvalidSignature
+	from cryptography.hazmat.primitives import hashes
+	from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+	try:
+		if isinstance(public_key, ec.EllipticCurvePublicKey):
+			public_key.verify(signature, signed, ec.ECDSA(hashes.SHA256()))
+		elif isinstance(public_key, rsa.RSAPublicKey):
+			public_key.verify(signature, signed, padding.PKCS1v15(), hashes.SHA256())
+		else:
+			raise ApiError("نوع مفتاح بصمة الجوال غير مدعوم")
+	except InvalidSignature:
+		raise ApiError("تعذّر التحقق من بصمة جوالك — أعد المحاولة", 403)
+
+
+def _webauthn_context():
+	"""يعيد Origin وRP ID كما يراها المتصفح (مع مراعاة الوسيط HTTPS)."""
+	req = getattr(frappe.local, "request", None)
+	proto, host = "https", ""
+	if req is not None:
+		hdrs = req.headers or {}
+		proto = (hdrs.get("X-Forwarded-Proto") or getattr(req, "scheme", "") or "https").split(",")[0].strip() or "https"
+		host = (hdrs.get("X-Forwarded-Host") or hdrs.get("Host") or getattr(req, "host", "") or "").split(",")[0].strip()
+	rp_id = host.split(":")[0].strip()
+	return {"origin": "%s://%s" % (proto, host), "rp_id": rp_id, "host": host}
+
+
+def _challenge_key(user_id):
+	return "hrpro_webauthn:%s" % user_id
+
+
+def _store_challenge(user_id, mode, info):
+	challenge = _b64url_encode(os.urandom(32))
+	frappe.cache().set_value(_challenge_key(user_id),
+	                         {"challenge": challenge, "mode": mode, "origin": info["origin"], "rp_id": info["rp_id"]},
+	                         expires_in_sec=180)
+	return challenge
+
+
+def _read_challenge(user_id, mode):
+	stored = frappe.cache().get_value(_challenge_key(user_id)) or {}
+	if not isinstance(stored, dict) or stored.get("mode") != mode or not stored.get("challenge"):
+		raise ApiError("انتهت صلاحية طلب بصمة الجوال — أعد المحاولة من الزر نفسه")
+	return stored
+
+
+def _client_data(payload, expected_type, stored):
+	try:
+		raw = _b64url_decode(payload.get("clientDataJSON"))
+		data = json.loads(raw.decode("utf-8"))
+	except Exception:
+		raise ApiError("لم تُقرأ بصمة الجهاز — أعد المحاولة")
+	if data.get("type") != expected_type:
+		raise ApiError("نوع طلب بصمة الجهاز غير صحيح")
+	if data.get("challenge") != stored.get("challenge"):
+		raise ApiError("انتهت صلاحية طلب بصمة الجوال — أعد المحاولة")
+	if str(data.get("origin") or "") != stored.get("origin"):
+		raise ApiError("طلب بصمة الجهاز لم يصدر من هذا الموقع", 403)
+	return raw
+
+
+def _check_auth_data(auth_data, stored):
+	if not isinstance(auth_data, bytes) or len(auth_data) < 37:
+		raise ApiError("بيانات بصمة الجهاز غير صالحة")
+	if auth_data[:32] != hashlib.sha256(str(stored["rp_id"]).encode()).digest():
+		raise ApiError("بصمة الجهاز غير مرتبطة بهذا النظام", 403)
+	flags = auth_data[32]
+	if not flags & 0x01:
+		raise ApiError("لم يتأكد وجودك على الجهاز — أعد المحاولة")
+	if not flags & 0x04:
+		raise ApiError("يجب تأكيد هويتك ببصمة الإصبع أو التعرف على الوجه على جوالك")
+	return int.from_bytes(auth_data[33:37], "big")
+
+
+def _verify_self_assertion(state, user_id, emp, payload):
+	"""يتحقق من توقيع بصمة جهاز الموظف قبل قبول بصمة الحضور."""
+	cred = _self_credential(state, emp.get("id"))
+	if not cred:
+		raise ApiError("فعّل بصمة جوالك أولاً من الخدمة الذاتية حتى تُقبل بصمتك", 428)
+	stored = _read_challenge(user_id, "assert")
+	raw_id = payload.get("rawId") or payload.get("id") or ""
+	if raw_id and _b64url_encode(_b64url_decode(raw_id)) != cred.get("credentialId"):
+		raise ApiError("بصمة هذا الجوال غير مسجلة لحسابك", 403)
+	try:
+		client_data = _client_data(payload, "webauthn.get", stored)
+		auth_data = _b64url_decode(payload.get("authenticatorData"))
+		signature = _b64url_decode(payload.get("signature"))
+	except ApiError:
+		raise
+	except Exception:
+		raise ApiError("لم تُقرأ بصمة الجوال — أعد المحاولة")
+	sign_count = _check_auth_data(auth_data, stored)
+	try:
+		cose, _ = _cbor_decode(_b64url_decode(cred.get("publicKey")))
+		public_key = _cose_public_key(cose)
+	except ApiError:
+		raise
+	except Exception:
+		raise ApiError("مفتاح بصمة الجوال غير صالح — أعد تفعيلها")
+	_verify_signature(public_key, signature, auth_data + hashlib.sha256(client_data).digest())
+	if sign_count and sign_count <= int(cred.get("signCount") or 0):
+		raise ApiError("أُعيد استخدام بصمة قديمة — أعد المحاولة", 403)
+	cred["signCount"] = sign_count or int(cred.get("signCount") or 0)
+	cred["lastUsedAt"] = engine._now()
+	frappe.cache().delete_value(_challenge_key(user_id))
+	return cred
+
+
+@route("GET", r"/self/attendance/context")
+def self_attendance_context(ctx):
+	s = ctx.state
+	emp = engine.find_employee(s, ctx.user.get("employeeId") or "")
+	if not emp:
+		raise ApiError("حسابك غير مرتبط بملف موظف — تواصل مع الموارد البشرية")
+	today = today_iso()
+	branch, geo = _branch_geo(s, emp.get("branchId"))
+	records = _self_punch_records(s, emp["id"], today)
+	day = next((d for d in s.get("attendanceDaily") or [] if d.get("empId") == emp["id"] and d.get("date") == today), None)
+	return {"data": {
+		"employee": {"id": emp.get("id"), "name": emp.get("name"), "employeeNumber": emp.get("employeeNumber")},
+		"branch": {"id": (branch or {}).get("id"), "name": (branch or {}).get("name")},
+		"geo": geo,
+		"today": day,
+		"punches": [{"time": r.get("punchTime") or r.get("checkIn") or "",
+		             "type": "خروج" if str(r.get("punchType")) == "1" else "دخول",
+		             "source": ATTENDANCE_SOURCE_LABELS.get(r.get("source"), r.get("source") or "يدوي")} for r in records],
+		"nextPunch": _self_next_punch(s, emp, records, today),
+		"canPunch": bool(geo.get("enabled")),
+		"reason": geo.get("reason") or "",
+		"biometric": {"required": _biometric_required(s),
+		              "enrolled": bool(_self_credential(s, emp["id"])),
+		              "enrolledAt": (_self_credential(s, emp["id"]) or {}).get("createdAt") or ""},
+		"serverTime": engine._now(),
+	}}
+
+
+@route("POST", r"/self/attendance/punch")
+def self_attendance_punch(ctx):
+	s = ctx.state
+	emp = engine.find_employee(s, ctx.user.get("employeeId") or "")
+	if not emp:
+		raise ApiError("حسابك غير مرتبط بملف موظف — تواصل مع الموارد البشرية")
+	if emp.get("status") == "terminated":
+		raise ApiError("لا يمكن تسجيل البصمة لموظف منتهي الخدمة", 403)
+	branch, geo = _branch_geo(s, emp.get("branchId"))
+	if not geo.get("enabled"):
+		raise ApiError(geo.get("reason") or "البصمة من الجوال غير متاحة", 403)
+	try:
+		lat = float(ctx.body.get("latitude"))
+		lng = float(ctx.body.get("longitude"))
+	except (TypeError, ValueError):
+		raise ApiError("تعذر قراءة موقعك — اسمح للتطبيق بالوصول إلى الموقع وأعد المحاولة")
+	if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+		raise ApiError("إحداثيات الموقع غير صحيحة")
+	accuracy = max(0.0, num(ctx.body.get("accuracy"), 0))
+	distance = _haversine_meters(lat, lng, geo["latitude"], geo["longitude"])
+	# تسامح بسيط مع دقة GPS (بحد أقصى 50 مترًا) حتى لا تُرفض البصمة داخل الفرع
+	allowed = geo["radius"] + min(accuracy, 50.0)
+	if distance > allowed:
+		raise ApiError("أنت خارج نطاق الفرع — المسافة الحالية %.0f م والحد المسموح %.0f م" % (distance, geo["radius"]), 403)
+	today = today_iso()
+	records = _self_punch_records(s, emp["id"], today)
+	if records:
+		last = str(records[-1].get("punchTime") or records[-1].get("checkIn") or "")
+		if len(last) >= 5 and last[:5] == datetime.now().strftime("%H:%M"):
+			raise ApiError("سُجلت بصمتك للتو — انتظر دقيقة قبل البصمة التالية")
+	# بصمة جهاز الموظف: لا تُقبل البصمة إلا بتأكيد بصمة الإصبع/الوجه على جواله
+	if _biometric_required(s):
+		_verify_self_assertion(s, ctx.user.get("id"), emp, ctx.body.get("biometric") or {})
+	punch_type = 0 if _self_next_punch(s, emp, records, today) == "in" else 1
+	now_text = datetime.now().strftime("%H:%M")
+	record = {
+		"id": uid("att_"), "empId": emp["id"], "employeeId": emp["id"],
+		"employeeName": emp.get("name") or "", "employeeNumber": emp.get("employeeNumber") or "",
+		"date": today, "punchTime": now_text, "punchType": punch_type,
+		"checkIn": now_text if punch_type == 0 else None, "checkOut": now_text if punch_type == 1 else None,
+		"branchId": emp.get("branchId") or "", "deviceId": "self-mobile", "source": "mobile",
+		"latitude": round(lat, 6), "longitude": round(lng, 6),
+		"distance": round(distance, 1), "accuracy": round(accuracy, 1), "createdAt": engine._now(),
+	}
+	s.setdefault("attendanceRecords", []).append(record)
+	engine.process_attendance(s, {"from": today, "to": today, "employeeId": emp["id"]})
+	day = next((d for d in s.get("attendanceDaily") or [] if d.get("empId") == emp["id"] and d.get("date") == today), None)
+	label = "دخول" if punch_type == 0 else "خروج"
+	ctx.audit("punch", "attendance", "attendanceRecords", record["id"],
+	          "بصمة جوال %s — %s الساعة %s (على %.0f م من الفرع)" % (emp.get("name"), label, now_text, distance))
+	_commit(ctx)
+	return {"data": {"record": record, "today": day, "distance": round(distance, 1),
+	                  "nextPunch": "out" if punch_type == 0 else "in"},
+	        "message": "تم تسجيل بصمة %s الساعة %s بعد تأكيد بصمة جوالك" % (label, now_text)}
+
+
+# ── تفعيل بصمة جوال الموظف والتحقق منها قبل كل بصمة حضور ──
+@route("POST", r"/self/biometric/register/options")
+def self_biometric_register_options(ctx):
+	s = ctx.state
+	emp = engine.find_employee(s, ctx.user.get("employeeId") or "")
+	if not emp:
+		raise ApiError("حسابك غير مرتبط بملف موظف — تواصل مع الموارد البشرية")
+	info = _webauthn_context()
+	if not info["rp_id"]:
+		raise ApiError("تعذر تحديد نطاق النظام لتفعيل بصمة الجوال")
+	challenge = _store_challenge(ctx.user.get("id"), "register", info)
+	existing = [c for c in s.get("selfCredentials") or [] if c.get("employeeId") == emp["id"]]
+	return {"data": {"publicKey": {
+		"challenge": challenge,
+		"rp": {"id": info["rp_id"], "name": "Tageep HRMS"},
+		"user": {"id": _b64url_encode(str(emp["id"]).encode()), 
+		         "name": emp.get("employeeNumber") or emp["id"],
+		         "displayName": emp.get("name") or ""},
+		"pubKeyCredParams": [{"type": "public-key", "alg": -7}, {"type": "public-key", "alg": -257}],
+		"timeout": 120000, "attestation": "none",
+		"authenticatorSelection": {"authenticatorAttachment": "platform", "userVerification": "required",
+		                           "residentKey": "preferred", "requireResidentKey": False},
+		"excludeCredentials": [{"type": "public-key", "id": c.get("credentialId"),
+		                        "transports": c.get("transports") or ["internal"]} for c in existing],
+	}}}
+
+
+@route("POST", r"/self/biometric/register")
+def self_biometric_register(ctx):
+	s = ctx.state
+	emp = engine.find_employee(s, ctx.user.get("employeeId") or "")
+	if not emp:
+		raise ApiError("حسابك غير مرتبط بملف موظف — تواصل مع الموارد البشرية")
+	stored = _read_challenge(ctx.user.get("id"), "register")
+	body = ctx.body or {}
+	try:
+		client_data = _client_data(body, "webauthn.create", stored)
+		attestation = _b64url_decode(body.get("attestationObject"))
+	except ApiError:
+		raise
+	except Exception:
+		raise ApiError("لم تُقرأ بصمة الجوال — أعد المحاولة")
+	try:
+		att, _ = _cbor_decode(attestation)
+	except Exception:
+		raise ApiError("بيانات تسجيل بصمة الجوال غير صالحة")
+	auth_data = att.get("authData") if isinstance(att, dict) else None
+	if not isinstance(auth_data, bytes) or len(auth_data) < 55:
+		raise ApiError("بيانات تسجيل بصمة الجوال غير صالحة")
+	_check_auth_data(auth_data, stored)
+	offset = 53
+	cred_len = int.from_bytes(auth_data[offset:offset + 2], "big")
+	offset += 2
+	cred_id = auth_data[offset:offset + cred_len]
+	offset += cred_len
+	try:
+		cose, cose_end = _cbor_decode(auth_data, offset)
+		cose_bytes = auth_data[offset:cose_end]
+		_cose_public_key(cose)
+	except Exception:
+		raise ApiError("مفتاح بصمة الجوال غير صالح")
+	if not cred_id:
+		raise ApiError("لم يُرسل الجهاز معرّفًا للبصمة")
+	credential_id = _b64url_encode(cred_id)
+	creds = s.setdefault("selfCredentials", [])
+	# بصمة واحدة لكل موظف: استبدل أي تسجيل سابق له أو لنفس الجهاز
+	creds[:] = [c for c in creds if c.get("employeeId") != emp["id"] and c.get("credentialId") != credential_id]
+	creds.append({
+		"id": uid("wc_"), "employeeId": emp["id"], "employeeName": emp.get("name") or "",
+		"userId": ctx.user.get("id"), "credentialId": credential_id,
+		"publicKey": _b64url_encode(cose_bytes), "signCount": 0,
+		"deviceLabel": str(body.get("deviceLabel") or "")[:160],
+		"transports": body.get("transports") or ["internal"],
+		"createdAt": engine._now(), "lastUsedAt": "", "ip": getattr(frappe.local, "request", None) and frappe.local.request.remote_addr or "",
+	})
+	frappe.cache().delete_value(_challenge_key(ctx.user.get("id")))
+	ctx.audit("biometric_register", "attendance", "selfCredentials", credential_id,
+	          "تفعيل بصمة جوال %s" % (emp.get("name") or ""))
+	_commit(ctx)
+	return {"data": {"enrolled": True, "credentialId": credential_id},
+	        "message": "تم تفعيل بصمة جوالك — من الآن لا تُقبل بصمة الحضور إلا ببصمة إصبعك أو وجهك"}
+
+
+@route("POST", r"/self/biometric/assert/options")
+def self_biometric_assert_options(ctx):
+	s = ctx.state
+	emp = engine.find_employee(s, ctx.user.get("employeeId") or "")
+	if not emp:
+		raise ApiError("حسابك غير مرتبط بملف موظف — تواصل مع الموارد البشرية")
+	cred = _self_credential(s, emp["id"])
+	if not cred:
+		raise ApiError("فعّل بصمة جوالك أولاً من الخدمة الذاتية حتى تُقبل بصمتك", 428)
+	info = _webauthn_context()
+	if not info["rp_id"]:
+		raise ApiError("تعذر تحديد نطاق النظام لقراءة بصمة الجوال")
+	challenge = _store_challenge(ctx.user.get("id"), "assert", info)
+	return {"data": {"publicKey": {
+		"challenge": challenge, "rpId": info["rp_id"], "timeout": 120000,
+		"userVerification": "required",
+		"allowCredentials": [{"type": "public-key", "id": cred["credentialId"],
+		                      "transports": cred.get("transports") or ["internal"]}],
+	}}}
+
+
+@route("DELETE", r"/self/biometric")
+def self_biometric_reset(ctx):
+	s = ctx.state
+	emp = engine.find_employee(s, ctx.user.get("employeeId") or "")
+	if not emp:
+		raise ApiError("حسابك غير مرتبط بملف موظف — تواصل مع الموارد البشرية")
+	before = len(s.get("selfCredentials") or [])
+	s["selfCredentials"] = [c for c in s.get("selfCredentials") or [] if c.get("employeeId") != emp["id"]]
+	ctx.audit("biometric_reset", "attendance", "selfCredentials", emp["id"],
+	          "إلغاء بصمة جوال %s" % (emp.get("name") or ""))
+	_commit(ctx)
+	return {"data": {"enrolled": False, "removed": before - len(s["selfCredentials"])},
+	        "message": "أُلغيت بصمة الجوال — اضغط «تفعيل بصمة الجوال» لتسجيل جوالك الحالي"}
+
+
 @route("POST", r"/self/requests")
 def self_create_request(ctx):
 	s = ctx.state
@@ -1842,6 +2411,97 @@ def users_reset_password(ctx, user_id):
 	ctx.audit("reset_password", "users", "users", user_id, "إعادة تعيين كلمة المرور")
 	_commit(ctx)
 	return {"ok": True, "message": "تم إعادة تعيين كلمة المرور"}
+
+
+# ═════════ حسابات الخدمة الذاتية للموظفين ═════════
+def _self_username(state, emp):
+	taken = {str(u.get("username") or "").lower() for u in state.get("users") or []}
+	base = re.sub(r"[^A-Za-z0-9_.-]", "", str(emp.get("employeeNumber") or emp.get("id") or "")).strip() or "emp"
+	candidate, index = base, 1
+	while candidate.lower() in taken:
+		index += 1
+		candidate = "%s%s" % (base, index)
+	return candidate
+
+
+def _generate_password(emp):
+	import secrets
+	digits = re.sub(r"\D", "", str(emp.get("nationalId") or ""))[-4:] or re.sub(r"\D", "", str(emp.get("employeeNumber") or ""))[-4:] or "1234"
+	return "Emp@%s%04d" % (digits, secrets.randbelow(10000))
+
+
+def _new_self_user(state, emp, password="", username=""):
+	username = username or _self_username(state, emp)
+	if any(str(u.get("username") or "").lower() == username.lower() for u in state.get("users") or []):
+		raise ApiError("اسم الدخول مستخدم بالفعل")
+	password = password or _generate_password(emp)
+	user = {
+		"id": uid("u_"), "name": emp.get("name") or username, "username": username,
+		"role": "employee", "permissions": {}, "branchId": emp.get("branchId") or "",
+		"employeeId": emp["id"], "passwordHash": hash_password(password),
+		"mustChangePassword": False, "createdAt": engine._now(), "active": True,
+	}
+	state.setdefault("users", []).append(user)
+	return user, password
+
+
+@route("POST", r"/employees/(?P<emp_id>[^/]+)/self-account", permission=("users", "add"))
+def employee_self_account(ctx, emp_id):
+	"""إنشاء أو تحديث حساب خدمة ذاتية للموظف مع ربطه بملفه الوظيفي."""
+	s = ctx.state
+	emp = engine.find_employee(s, emp_id)
+	if not emp:
+		raise ApiError("الموظف غير موجود", 404)
+	if emp.get("status") == "terminated":
+		raise ApiError("لا يمكن إنشاء حساب لموظف منتهي الخدمة")
+	users = s.setdefault("users", [])
+	existing = next((u for u in users if u.get("employeeId") == emp["id"]), None)
+	password = str(ctx.body.get("password") or "")
+	if password:
+		issues = password_issues(password, (existing or {}).get("username") or emp.get("employeeNumber"))
+		if issues:
+			raise ApiError(" — ".join(issues))
+	if existing:
+		if existing.get("role") != "employee":
+			return {"data": {"id": existing.get("id"), "username": existing.get("username"), "password": "", "existing": True},
+			        "message": "لدى الموظف حساب بدور مختلف — لم يُنشأ حساب خدمة ذاتية جديد"}
+		existing.update({"name": emp.get("name") or existing.get("name"), "branchId": emp.get("branchId") or "",
+		                 "disabled": False, "active": True})
+		if password:
+			existing["passwordHash"] = hash_password(password)
+			existing.pop("password", None)
+		ctx.audit("update", "users", "users", existing["id"], "تحديث حساب خدمة ذاتية لـ %s" % emp.get("name"))
+		_commit(ctx)
+		return {"data": {"id": existing["id"], "username": existing.get("username"), "password": password, "existing": True},
+		        "message": "تم تحديث حساب الخدمة الذاتية" + (" وإعادة تعيين كلمة المرور" if password else "")}
+	user, password = _new_self_user(s, emp, password, str(ctx.body.get("username") or "").strip())
+	ctx.audit("create", "users", "users", user["id"], "إنشاء حساب خدمة ذاتية لـ %s" % emp.get("name"))
+	_commit(ctx)
+	return {"data": {"id": user["id"], "name": user["name"], "username": user["username"],
+	                  "password": password, "employeeId": emp["id"]},
+	        "message": "تم إنشاء حساب الخدمة الذاتية"}
+
+
+@route("POST", r"/users/self-accounts", permission=("users", "add"))
+def users_self_accounts_bulk(ctx):
+	"""إنشاء حساب خدمة ذاتية لكل الموظفين النشطين الذين ليس لديهم حساب بعد."""
+	s = ctx.state
+	users = s.setdefault("users", [])
+	created, skipped = [], 0
+	for emp in s.get("employees") or []:
+		if emp.get("status") == "terminated":
+			continue
+		if any(u.get("employeeId") == emp.get("id") for u in users):
+			skipped += 1
+			continue
+		user, password = _new_self_user(s, emp)
+		created.append({"employeeId": emp["id"], "name": emp.get("name"), "username": user["username"],
+		                "password": password, "branchName": _branch_label(s, emp.get("branchId"))})
+	if created:
+		ctx.audit("create", "users", "users", "", "إنشاء %s حساب خدمة ذاتية" % len(created))
+		_commit(ctx)
+	return {"data": {"created": created, "skipped": skipped},
+	        "message": "تم إنشاء %s حساب خدمة ذاتية" % len(created)}
 
 
 @route("GET", r"/audit", permission=("audit", "view"))

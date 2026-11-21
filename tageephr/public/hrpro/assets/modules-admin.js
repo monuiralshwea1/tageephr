@@ -1116,7 +1116,7 @@
                 pane.innerHTML = `<div class="toolbar" style="padding:0 0 14px;border:0">
                         <span class="small muted">الأدوار تحدد الصلاحيات افتراضيًا، ويمكن تخصيص كل وحدة</span>
                         <span class="grow"></span>
-                        ${A.can('users', 'add') ? `<button class="btn btn-primary" id="userAdd">${A.icon('plus')} مستخدم جديد</button>` : ''}
+                        ${A.can('users', 'add') ? `<button class="btn" id="userSelfBulk">${A.icon('user')} حسابات الخدمة الذاتية</button><button class="btn btn-primary" id="userAdd">${A.icon('plus')} مستخدم جديد</button>` : ''}
                     </div>
                     ${A.table({
                         columns: [
@@ -1136,6 +1136,31 @@
                     })}`;
                 const add = document.getElementById('userAdd');
                 if (add) add.onclick = () => userForm(null, renderUsers);
+                const bulk = document.getElementById('userSelfBulk');
+                if (bulk) bulk.onclick = async () => {
+                    const yes = await A.confirm({
+                        title: 'حسابات الخدمة الذاتية',
+                        message: 'سيُنشأ حساب خدمة ذاتية لكل موظف نشط ليس لديه حساب. تُعرض كلمات المرور مرة واحدة فقط.',
+                        confirmLabel: 'إنشاء الحسابات'
+                    });
+                    if (!yes) return;
+                    try {
+                        const result = await A.post('/users/self-accounts');
+                        const data = result.data || {};
+                        const created = data.created || [];
+                        A.rawModal({
+                            title: 'حسابات الخدمة الذاتية',
+                            body: created.length
+                                ? `<div class="alert warning">${A.icon('alert')}<div>انسخ كلمات المرور وسلّمها للموظفين الآن — لن تُعرض مرة أخرى.</div></div>
+                                    <div class="table-wrap"><table class="data"><thead><tr><th>الموظف</th><th>الفرع</th><th>اسم الدخول</th><th>كلمة المرور</th></tr></thead><tbody>
+                                    ${created.map(c => `<tr><td>${h(c.name)}</td><td>${h(c.branchName || '—')}</td><td dir="ltr">${h(c.username)}</td><td dir="ltr">${h(c.password)}</td></tr>`).join('')}
+                                    </tbody></table></div>`
+                                : `<div class="empty">${A.icon('checkCircle')}<div>لا توجد حسابات جديدة — تم تخطي ${A.numFmt(data.skipped)} موظف لديه حساب بالفعل.</div></div>`,
+                            footer: '<button class="btn btn-primary" data-close>تم</button>'
+                        });
+                        A.toast(result.message);
+                    } catch (err) { A.toast(err.message, 'error'); }
+                };
                 A.bindActions({
                     edit: id => userForm(rows.find(u => u.id === id), renderUsers),
                     reset: id => {
@@ -1715,11 +1740,27 @@
                 view.innerHTML = `<div class="alert warning">${A.icon('alert')}<div>لم يتم ربط حسابك بملف موظف. تواصل مع مدير الموارد البشرية لربط الحساب من شاشة المستخدمين.</div></div>`;
                 return;
             }
-            const [data, overviewRes] = await Promise.all([
+            const [data, overviewRes, punchRes] = await Promise.all([
                 A.get(`/employees/${employee.id}/profile`),
-                A.get('/self/overview').catch(() => ({ data: {} }))
+                A.get('/self/overview').catch(() => ({ data: {} })),
+                A.get('/self/attendance/context').catch(() => ({ data: {} }))
             ]);
             const overview = overviewRes.data || {};
+            const punchCtx = punchRes.data || {};
+            const geo = punchCtx.geo || {};
+            const todayRow = punchCtx.today || {};
+            const myPunches = punchCtx.punches || [];
+            const punchLabel = punchCtx.nextPunch === 'out' ? 'بصمة انصراف' : 'بصمة حضور';
+            const bio = punchCtx.biometric || {};
+            const bioRequired = bio.required !== false;
+            const bioEnrolled = !!bio.enrolled;
+            const punchHint = !punchCtx.canPunch
+                ? (punchCtx.reason || 'البصمة من الجوال غير متاحة لحسابك')
+                : (!bioEnrolled ? 'فعّل بصمة جوالك أولاً — لن تُقبل بصمتك من أي جوال آخر' : 'تُقبل البصمة داخل نطاق الفرع فقط وببصمة إصبعك أو وجهك');
+            const todayText = todayRow.checkIn
+                ? `${todayRow.checkIn}${todayRow.checkOut ? ' ← ' + todayRow.checkOut : ''}`
+                : 'لم تُسجّل بعد';
+            const lastPunch = myPunches[myPunches.length - 1];
             const myTasks = overview.tasks || (A.state.data.tasks || []).filter(t => t.employeeId === employee.id);
             const myRequests = overview.requests || [];
             const myAdvances = overview.advances || [];
@@ -1742,6 +1783,18 @@
                             <button class="btn" id="selfAdvance">${A.icon('credit')} طلب سلفة</button>
                             <button class="btn" id="selfComplaint">${A.icon('alert')} شكوى أو طلب</button>
                         </div>
+                    </div>
+                </div>
+                <div class="card mt">
+                    <div class="punch-mini ${punchCtx.canPunch && bioEnrolled ? '' : 'has-note'}">
+                        <button class="btn btn-primary punch-btn" id="selfPunch" ${punchCtx.canPunch && bioEnrolled ? '' : 'disabled'}>${A.icon('fingerprint')} ${punchLabel}</button>
+                        ${bioRequired && !bioEnrolled ? `<button class="btn btn-sm punch-btn" id="selfBio">${A.icon('shield')} تفعيل بصمة جوالك</button>` : ''}
+                        <div class="punch-meta">
+                            <span>اليوم: <strong>${h(todayText)}</strong></span>
+                            ${geo.enabled ? `<span>النطاق: <strong>${A.numFmt(geo.radius)}م</strong></span>` : ''}
+                            ${lastPunch ? `<span>آخر بصمة: <strong>${h(lastPunch.time)}</strong></span>` : ''}
+                        </div>
+                        <div class="punch-note ${punchCtx.canPunch ? '' : 'warn'}">${h(punchHint)}</div>
                     </div>
                 </div>
                 <div class="grid grid-4 mt">
@@ -1825,6 +1878,134 @@
             });
             document.getElementById('selfAdvance').onclick = () => A.selfRequestModal('advance', employee, () => A.route());
             document.getElementById('selfComplaint').onclick = () => A.selfRequestModal('complaint', employee, () => A.route());
+            // ── بصمة جهاز الموظف (WebAuthn): لا تُقبل بصمة الحضور إلا من جواله هو ──
+            const b64ToBytes = value => {
+                const text = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+                const raw = atob(text + '='.repeat((4 - text.length % 4) % 4));
+                const bytes = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+                return bytes;
+            };
+            const bytesToB64 = buffer => {
+                const bytes = new Uint8Array(buffer);
+                let text = '';
+                for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+                return btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            };
+            const biometricSupported = () => !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create);
+            const registerBiometric = async retried => {
+                if (!biometricSupported()) throw new Error('هذا المتصفح لا يدعم بصمة الجوال — افتح النظام عبر HTTPS من جوالك');
+                const res = await A.post('/self/biometric/register/options', {});
+                const pk = ((res || {}).data || {}).publicKey || {};
+                let credential;
+                try {
+                    credential = await navigator.credentials.create({ publicKey: {
+                        challenge: b64ToBytes(pk.challenge),
+                        rp: pk.rp,
+                        user: { id: b64ToBytes(pk.user.id), name: pk.user.name, displayName: pk.user.displayName },
+                        pubKeyCredParams: pk.pubKeyCredParams,
+                        authenticatorSelection: pk.authenticatorSelection,
+                        attestation: 'none',
+                        timeout: pk.timeout || 120000,
+                        excludeCredentials: (pk.excludeCredentials || []).map(c => ({ ...c, id: b64ToBytes(c.id) }))
+                    } });
+                } catch (err) {
+                    // البصمة مسجلة مسبقًا على هذا الجوال: نلغيها من الخادم ثم نعيد التسجيل
+                    if (!retried && err && err.name === 'InvalidStateError') {
+                        try { await A.del('/self/biometric'); } catch (_) {}
+                        return registerBiometric(true);
+                    }
+                    throw new Error(err && err.name === 'NotAllowedError'
+                        ? 'لم يتم تأكيد بصمة جوالك — أعد المحاولة واسمح بالبصمة'
+                        : (err && err.message) || 'تعذر قراءة بصمة جوالك');
+                }
+                if (!credential) throw new Error('لم تُسجَّل بصمة الجوال');
+                try {
+                    return await A.post('/self/biometric/register', {
+                        id: credential.id,
+                        rawId: bytesToB64(credential.rawId),
+                        clientDataJSON: bytesToB64(credential.response.clientDataJSON),
+                        attestationObject: bytesToB64(credential.response.attestationObject),
+                        transports: (credential.response.getTransports && credential.response.getTransports()) || ['internal'],
+                        deviceLabel: String(navigator.userAgent || '').slice(0, 150)
+                    });
+                } catch (err) {
+                    throw new Error(err.message || 'تعذر حفظ بصمة الجوال');
+                }
+            };
+            const readBiometric = async () => {
+                if (!biometricSupported()) throw new Error('هذا المتصفح لا يدعم بصمة الجوال — افتح النظام عبر HTTPS من جوالك');
+                const res = await A.post('/self/biometric/assert/options', {});
+                const pk = ((res || {}).data || {}).publicKey || {};
+                let assertion;
+                try {
+                    assertion = await navigator.credentials.get({ publicKey: {
+                        challenge: b64ToBytes(pk.challenge),
+                        rpId: pk.rpId,
+                        timeout: pk.timeout || 120000,
+                        userVerification: 'required',
+                        allowCredentials: (pk.allowCredentials || []).map(c => ({ ...c, id: b64ToBytes(c.id) }))
+                    } });
+                } catch (err) {
+                    throw new Error(err && err.name === 'NotAllowedError'
+                        ? 'لم يتم تأكيد بصمة جوالك — أعد المحاولة'
+                        : (err && err.message) || 'تعذر قراءة بصمة جوالك');
+                }
+                if (!assertion) throw new Error('لم يتم تأكيد بصمة جوالك');
+                return {
+                    id: assertion.id,
+                    rawId: bytesToB64(assertion.rawId),
+                    clientDataJSON: bytesToB64(assertion.response.clientDataJSON),
+                    authenticatorData: bytesToB64(assertion.response.authenticatorData),
+                    signature: bytesToB64(assertion.response.signature),
+                    userHandle: assertion.response.userHandle ? bytesToB64(assertion.response.userHandle) : ''
+                };
+            };
+            const positionOnce = () => new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+            });
+            const explainGeoError = err => {
+                if (err && err.code === 1) return A.toast('اسمح بالوصول إلى الموقع من إعدادات المتصفح ثم أعد المحاولة', 'error');
+                if (err && err.code === 2) return A.toast('تعذر تحديد موقعك — تأكد من تشغيل GPS وحاول مجددًا', 'error');
+                if (err && err.code === 3) return A.toast('انتهت مهلة تحديد الموقع — حاول في مكان مفتوح', 'error');
+                return A.toast((err && err.message) || 'تعذر تحديد موقعك', 'error');
+            };
+            const enrollBtn = document.getElementById('selfBio');
+            if (enrollBtn) enrollBtn.onclick = async () => {
+                enrollBtn.disabled = true;
+                A.toast('اتبع مطالبة الجوال لتسجيل بصمة إصبعك أو وجهك...');
+                try {
+                    const result = await registerBiometric();
+                    A.toast((result && result.message) || 'تم تفعيل بصمة جوالك');
+                    A.route();
+                } catch (err) {
+                    enrollBtn.disabled = false;
+                    A.toast(err.message || 'تعذر تفعيل بصمة الجوال', 'error');
+                }
+            };
+            const punchBtn = document.getElementById('selfPunch');
+            if (punchBtn) punchBtn.onclick = async () => {
+                if (!navigator.geolocation) return A.toast('جهازك لا يدعم تحديد الموقع', 'error');
+                punchBtn.disabled = true;
+                try {
+                    A.toast('جارٍ تحديد موقعك...');
+                    const position = await positionOnce();
+                    A.toast('أكّد بصمة جوالك لإتمام البصمة...');
+                    const biometric = bioRequired ? await readBiometric() : null;
+                    const result = await A.post('/self/attendance/punch', {
+                        latitude: position.coords.latitude,
+                        longitude: position.coords.longitude,
+                        accuracy: position.coords.accuracy,
+                        biometric
+                    });
+                    A.toast(result.message);
+                    A.route();
+                } catch (err) {
+                    punchBtn.disabled = false;
+                    if (err && typeof err.code === 'number') explainGeoError(err);
+                    else A.toast((err && err.message) || 'تعذر تسجيل البصمة', 'error');
+                }
+            };
             A.bindActions({
                 selfTask: id => {
                     const task = myTasks.find(t => t.id === id);
