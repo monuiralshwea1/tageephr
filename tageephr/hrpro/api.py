@@ -986,6 +986,17 @@ def fingerprint_punches(ctx):
 			if value:
 				existing.add("%s|%s|%s" % (emp_id, day, str(value)[:5]))
 
+	# أوقات بصمات الجوال: تُتجاهل بصمة الجهاز المكررة قربها حتى لا تُحسب مرتين
+	mobile_times = {}
+	for a in s.get("attendanceRecords") or []:
+		if a.get("source") != "mobile":
+			continue
+		emp_id = a.get("empId") or a.get("employeeId")
+		day = date_only(a.get("date"))
+		minute = _minute_of(a.get("punchTime") or a.get("checkIn") or a.get("checkOut"))
+		if emp_id and day and minute is not None:
+			mobile_times.setdefault((emp_id, day), []).append(minute)
+
 	records = s.setdefault("attendanceRecords", [])
 	for p in punches:
 		number = str(p.get("employeeNumber") or p.get("employeeId") or p.get("empId") or p.get("pin") or p.get("userId") or "").strip()
@@ -1009,6 +1020,10 @@ def fingerprint_punches(ctx):
 			continue
 		key = "%s|%s|%s" % (emp["id"], day, str(time_text)[:5])
 		if key in existing:
+			skipped += 1
+			continue
+		minute = _minute_of(time_text)
+		if minute is not None and any(abs(minute - m) <= 10 for m in mobile_times.get((emp["id"], day), ())):
 			skipped += 1
 			continue
 		punch_type = p.get("punchType")
@@ -1910,8 +1925,29 @@ def _self_credential(state, emp_id):
 	             if c.get("employeeId") == emp_id and c.get("credentialId")), None)
 
 
-def _biometric_required(state):
-	return (state.get("settings") or {}).get("mobilePunchBiometric") is not False
+def _biometric_required(state, emp=None):
+	"""إلزام بصمة الجوال — يُعطّل عامًّا من الإعدادات أو لموظف جواله لا يدعم البصمة."""
+	if (state.get("settings") or {}).get("mobilePunchBiometric") is False:
+		return False
+	return not (emp or {}).get("mobileBiometricExempt")
+
+
+def _minute_of(value):
+	m = re.search(r"(\d{1,2}):(\d{2})", str(value or ""))
+	return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def _device_punch_near(records, minute, minutes=10):
+	"""بصمة جهاز البصمة القريبة زمنيًا — لمنع تسجيل البصمة مرتين."""
+	if minute is None:
+		return None
+	for r in records:
+		if (r.get("source") or "") == "mobile":
+			continue
+		near = _minute_of(r.get("punchTime") or r.get("checkIn") or r.get("checkOut"))
+		if near is not None and abs(near - minute) <= minutes:
+			return r
+	return None
 
 
 # ── التحقق من بصمة جهاز الموظف (WebAuthn / Passkey) ──
@@ -2131,7 +2167,7 @@ def self_attendance_context(ctx):
 		"nextPunch": _self_next_punch(s, emp, records, today),
 		"canPunch": bool(geo.get("enabled")),
 		"reason": geo.get("reason") or "",
-		"biometric": {"required": _biometric_required(s),
+		"biometric": {"required": _biometric_required(s, emp),
 		              "enrolled": bool(_self_credential(s, emp["id"])),
 		              "enrolledAt": (_self_credential(s, emp["id"]) or {}).get("createdAt") or ""},
 		"serverTime": engine._now(),
@@ -2163,16 +2199,21 @@ def self_attendance_punch(ctx):
 	if distance > allowed:
 		raise ApiError("أنت خارج نطاق الفرع — المسافة الحالية %.0f م والحد المسموح %.0f م" % (distance, geo["radius"]), 403)
 	today = today_iso()
+	now_text = datetime.now().strftime("%H:%M")
 	records = _self_punch_records(s, emp["id"], today)
 	if records:
 		last = str(records[-1].get("punchTime") or records[-1].get("checkIn") or "")
-		if len(last) >= 5 and last[:5] == datetime.now().strftime("%H:%M"):
+		if len(last) >= 5 and last[:5] == now_text:
 			raise ApiError("سُجلت بصمتك للتو — انتظر دقيقة قبل البصمة التالية")
+		# البصمة من الجوال بديل عند تعطل جهاز البصمة: لا نكرر بصمة سجلها الجهاز
+		device_hit = _device_punch_near(records, _minute_of(now_text))
+		if device_hit:
+			raise ApiError("بصمتك مسجّلة من جهاز البصمة الساعة %s — بصمة الجوال بديل عند تعطل الجهاز"
+			               % (device_hit.get("punchTime") or device_hit.get("checkIn") or ""))
 	# بصمة جهاز الموظف: لا تُقبل البصمة إلا بتأكيد بصمة الإصبع/الوجه على جواله
-	if _biometric_required(s):
+	if _biometric_required(s, emp):
 		_verify_self_assertion(s, ctx.user.get("id"), emp, ctx.body.get("biometric") or {})
 	punch_type = 0 if _self_next_punch(s, emp, records, today) == "in" else 1
-	now_text = datetime.now().strftime("%H:%M")
 	record = {
 		"id": uid("att_"), "empId": emp["id"], "employeeId": emp["id"],
 		"employeeName": emp.get("name") or "", "employeeNumber": emp.get("employeeNumber") or "",
@@ -2205,7 +2246,6 @@ def self_biometric_register_options(ctx):
 	if not info["rp_id"]:
 		raise ApiError("تعذر تحديد نطاق النظام لتفعيل بصمة الجوال")
 	challenge = _store_challenge(ctx.user.get("id"), "register", info)
-	existing = [c for c in s.get("selfCredentials") or [] if c.get("employeeId") == emp["id"]]
 	return {"data": {"publicKey": {
 		"challenge": challenge,
 		"rp": {"id": info["rp_id"], "name": "Tageep HRMS"},
@@ -2216,8 +2256,6 @@ def self_biometric_register_options(ctx):
 		"timeout": 120000, "attestation": "none",
 		"authenticatorSelection": {"authenticatorAttachment": "platform", "userVerification": "required",
 		                           "residentKey": "preferred", "requireResidentKey": False},
-		"excludeCredentials": [{"type": "public-key", "id": c.get("credentialId"),
-		                        "transports": c.get("transports") or ["internal"]} for c in existing],
 	}}}
 
 
@@ -2298,6 +2336,7 @@ def self_biometric_assert_options(ctx):
 	}}}
 
 
+@route("POST", r"/self/biometric/reset")
 @route("DELETE", r"/self/biometric")
 def self_biometric_reset(ctx):
 	s = ctx.state
@@ -2311,6 +2350,24 @@ def self_biometric_reset(ctx):
 	_commit(ctx)
 	return {"data": {"enrolled": False, "removed": before - len(s["selfCredentials"])},
 	        "message": "أُلغيت بصمة الجوال — اضغط «تفعيل بصمة الجوال» لتسجيل جوالك الحالي"}
+
+
+@route("POST", r"/employees/(?P<emp_id>[^/]+)/biometric/reset")
+def employee_biometric_reset(ctx, emp_id):
+	"""إعادة تعيين بصمة جوال موظف من شاشة الموظفين (مدير/موارد بشرية)."""
+	ctx.require_permission("employees", "edit")
+	s = ctx.state
+	emp = engine.find_employee(s, emp_id)
+	if not emp:
+		raise ApiError("الموظف غير موجود", 404)
+	ctx.scope_branch(emp.get("branchId"))
+	before = len(s.get("selfCredentials") or [])
+	s["selfCredentials"] = [c for c in s.get("selfCredentials") or [] if c.get("employeeId") != emp["id"]]
+	ctx.audit("biometric_reset", "employees", "selfCredentials", emp["id"],
+	          "إعادة تعيين بصمة جوال %s من شاشة الموظفين" % (emp.get("name") or ""))
+	_commit(ctx)
+	return {"data": {"enrolled": False, "removed": before - len(s["selfCredentials"])},
+	        "message": "أُعيد تعيين بصمة جوال %s — يسجّل جواله من جديد من الخدمة الذاتية" % (emp.get("name") or "")}
 
 
 @route("POST", r"/self/requests")

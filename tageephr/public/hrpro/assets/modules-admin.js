@@ -1754,9 +1754,10 @@
             const bio = punchCtx.biometric || {};
             const bioRequired = bio.required !== false;
             const bioEnrolled = !!bio.enrolled;
+            const canPunchNow = !!punchCtx.canPunch && (bioEnrolled || !bioRequired);
             const punchHint = !punchCtx.canPunch
                 ? (punchCtx.reason || 'البصمة من الجوال غير متاحة لحسابك')
-                : (!bioEnrolled ? 'فعّل بصمة جوالك أولاً — لن تُقبل بصمتك من أي جوال آخر' : 'تُقبل البصمة داخل نطاق الفرع فقط وببصمة إصبعك أو وجهك');
+                : (bioRequired && !bioEnrolled ? 'فعّل بصمة جوالك أولاً — لن تُقبل بصمتك من أي جوال آخر' : 'بصمة الجوال بديل عند تعطل جهاز البصمة — تُقبل داخل نطاق الفرع وببصمة إصبعك أو وجهك');
             const todayText = todayRow.checkIn
                 ? `${todayRow.checkIn}${todayRow.checkOut ? ' ← ' + todayRow.checkOut : ''}`
                 : 'لم تُسجّل بعد';
@@ -1786,9 +1787,9 @@
                     </div>
                 </div>
                 <div class="card mt">
-                    <div class="punch-mini ${punchCtx.canPunch && bioEnrolled ? '' : 'has-note'}">
-                        <button class="btn btn-primary punch-btn" id="selfPunch" ${punchCtx.canPunch && bioEnrolled ? '' : 'disabled'}>${A.icon('fingerprint')} ${punchLabel}</button>
-                        ${bioRequired && !bioEnrolled ? `<button class="btn btn-sm punch-btn" id="selfBio">${A.icon('shield')} تفعيل بصمة جوالك</button>` : ''}
+                    <div class="punch-mini ${canPunchNow ? '' : 'has-note'}">
+                        <button class="btn btn-primary punch-btn" id="selfPunch" ${canPunchNow ? '' : 'disabled'}>${A.icon('fingerprint')} ${punchLabel}</button>
+                        ${bioRequired || bioEnrolled ? `<button class="btn btn-sm punch-btn" id="selfBio">${A.icon('shield')} ${bioEnrolled ? 'إعادة تسجيل بصمة جوالك' : 'تفعيل بصمة جوالك'}</button>` : ''}
                         <div class="punch-meta">
                             <span>اليوم: <strong>${h(todayText)}</strong></span>
                             ${geo.enabled ? `<span>النطاق: <strong>${A.numFmt(geo.radius)}م</strong></span>` : ''}
@@ -1910,14 +1911,16 @@
                         excludeCredentials: (pk.excludeCredentials || []).map(c => ({ ...c, id: b64ToBytes(c.id) }))
                     } });
                 } catch (err) {
-                    // البصمة مسجلة مسبقًا على هذا الجوال: نلغيها من الخادم ثم نعيد التسجيل
+                    // بصمة قديمة على الجوال: تُلغى من الخادم ثم يُعاد التسجيل
                     if (!retried && err && err.name === 'InvalidStateError') {
-                        try { await A.del('/self/biometric'); } catch (_) {}
+                        try { await A.post('/self/biometric/reset'); } catch (_) {}
                         return registerBiometric(true);
                     }
                     throw new Error(err && err.name === 'NotAllowedError'
                         ? 'لم يتم تأكيد بصمة جوالك — أعد المحاولة واسمح بالبصمة'
-                        : (err && err.message) || 'تعذر قراءة بصمة جوالك');
+                        : err && err.name === 'NotSupportedError'
+                            ? 'جوالك لا يدعم بصمة الإصبع أو الوجه — فعّل قفل الشاشة أولاً أو استخدم جهاز البصمة'
+                            : (err && err.message) || 'تعذر قراءة بصمة جوالك');
                 }
                 if (!credential) throw new Error('لم تُسجَّل بصمة الجوال');
                 try {

@@ -177,6 +177,8 @@
         { type: 'section', label: 'إعدادات الإجازات', icon: 'palmtree' },
         { key: 'lateConversionLeaveTypeId', label: 'نوع الإجازة لتحويل ساعات التأخير', type: 'select', options: A.options.leaves(), placeholder: 'افتراضي النظام' },
         { key: 'leaveBalance', label: 'رصيد الإجازات الافتتاحي', type: 'number', step: '0.5', help: 'يستخدم عند ترحيل بيانات قديمة' },
+        { type: 'section', label: 'بصمة الجوال', icon: 'fingerprint' },
+        { key: 'mobileBiometricExempt', label: 'تعطيل إلزام بصمة الجوال لهذا الموظف', type: 'checkbox', help: 'حدّده إذا كان جواله لا يدعم بصمة الإصبع أو الوجه — تُقبل بصمته من الجوال بدون بصمة حيوية بدلًا من أن يُمنع من البصمة.' },
         { key: 'notes', label: 'ملاحظات', type: 'textarea', full: true }
     ]);
 
@@ -441,6 +443,7 @@
                     actions: e => [
                         { title: 'الملف', icon: 'eye', action: 'view' },
                         ...(A.can('users', 'add') ? [{ title: 'حساب الخدمة الذاتية', icon: 'user', action: 'selfUser' }] : []),
+                        ...(A.can('employees', 'edit') ? [{ title: 'إعادة تعيين بصمة الجوال', icon: 'fingerprint', action: 'bioReset' }] : []),
                         ...(A.can('employees', 'edit') ? [{ title: 'تعديل', icon: 'edit', action: 'edit' }] : []),
                         ...(A.can('employees', 'delete') ? [{ title: 'حذف', icon: 'trash', action: 'del', class: 'btn-danger' }] : [])
                     ],
@@ -497,6 +500,12 @@
         A.bindActions({
             view: id => A.navigate('/employees/' + id),
             edit: id => employeeForm(A.employeeById(id)),
+            bioReset: async id => {
+                const emp = A.employeeById(id);
+                if (!emp) return;
+                if (!(await A.confirm({ title: 'إعادة تعيين بصمة الجوال', message: `سيُلغى تسجيل جوال <strong>${h(emp.name)}</strong> الحالي ويسجّل جواله من جديد من الخدمة الذاتية.`, confirmLabel: 'إعادة التعيين' }))) return;
+                try { const r = await A.post(`/employees/${id}/biometric/reset`); A.toast(r.message); } catch (err) { A.toast(err.message, 'error'); }
+            },
             selfUser: async id => {
                 const emp = A.employeeById(id);
                 if (!emp) return;
