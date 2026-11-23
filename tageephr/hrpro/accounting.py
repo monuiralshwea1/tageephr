@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import json
 import re
 from datetime import datetime
@@ -32,9 +33,30 @@ VOUCHER_TYPES = {
 	"payment": {"label": "سند صرف", "prefix": "PV"},
 	"journal": {"label": "قيد يومية", "prefix": "JV"},
 	"opening": {"label": "قيد افتتاحي", "prefix": "OB"},
+	"closing": {"label": "قيد إقفال سنوي", "prefix": "CL"},
 }
 
 PARTY_TYPES = {"": "بدون", "customer": "عميل", "supplier": "مورد", "employee": "موظف", "other": "أخرى"}
+
+# عملات جاهزة تُقترح عند إضافة عملة جديدة (الرمز والاسم فقط، والسعر يُدخله المستخدم)
+CURRENCY_PRESETS = {
+	"YER": {"symbol": "ر.ي", "name": "ريال يمني"},
+	"SAR": {"symbol": "ر.س", "name": "ريال سعودي"},
+	"USD": {"symbol": "$", "name": "دولار أمريكي"},
+	"EUR": {"symbol": "€", "name": "يورو"},
+	"AED": {"symbol": "د.إ", "name": "درهم إماراتي"},
+	"GBP": {"symbol": "£", "name": "جنيه إسترليني"},
+	"KWD": {"symbol": "د.ك", "name": "دينار كويتي"},
+	"QAR": {"symbol": "ر.ق", "name": "ريال قطري"},
+	"OMR": {"symbol": "ر.ع", "name": "ريال عماني"},
+	"BHD": {"symbol": "د.ب", "name": "دينار بحريني"},
+	"JOD": {"symbol": "د.أ", "name": "دينار أردني"},
+	"EGP": {"symbol": "ج.م", "name": "جنيه مصري"},
+	"TRY": {"symbol": "₺", "name": "ليرة تركية"},
+	"CNY": {"symbol": "¥", "name": "يوان صيني"},
+	"INR": {"symbol": "₹", "name": "روبية هندية"},
+	"DJF": {"symbol": "ف.ج", "name": "فرنك جيبوتي"},
+}
 
 
 DEFAULT_ACCOUNTS = [
@@ -90,6 +112,99 @@ def default_accounts() -> list[dict]:
 		row["builtin"] = True
 		out.append(row)
 	return out
+
+
+# ───────────────────────── العملات وأسعار الصرف ─────────────────────────
+# قاعدة العملات: كل المبالغ في النظام (الأرصدة والسندات والتقارير) تُحفظ
+# بالعملة الأساسية المختارة في الإعدادات. سعر الصرف لأي عملة = كم وحدة من
+# العملة الأساسية تساوي وحدة واحدة من هذه العملة، لذا التحويل إلى العملة
+# الأخرى للعرض يكون بقسمة المبلغ على السعر.
+
+def base_code(state) -> str:
+	return str(((state.get("settings") or {}).get("currencyCode")) or "YER").strip().upper()
+
+
+def _preset(code) -> dict:
+	return CURRENCY_PRESETS.get(code) or {"symbol": code, "name": code}
+
+
+def ensure_currencies(state) -> list[dict]:
+	rows = state.get("currencies")
+	if not isinstance(rows, list):
+		rows = []
+	code = base_code(state)
+	settings = state.get("settings") or {}
+	base = next((r for r in rows if str(r.get("code") or "").upper() == code), None)
+	if not base:
+		preset = _preset(code)
+		base = {"id": "cur_%s" % code.lower(), "code": code,
+		        "symbol": str(settings.get("currency") or preset["symbol"]), "name": preset["name"],
+		        "rate": 1.0, "active": True,
+		        "createdAt": datetime.now().isoformat(timespec="seconds")}
+		rows.insert(0, base)
+	if not str(base.get("symbol") or ""):
+		base["symbol"] = str(settings.get("currency") or _preset(code)["symbol"])
+	if not str(base.get("name") or ""):
+		base["name"] = _preset(code)["name"]
+	base["rate"] = 1.0
+	for row in rows:
+		row["isBase"] = str(row.get("code") or "").upper() == code
+		if not str(row.get("symbol") or ""):
+			row["symbol"] = _preset(str(row.get("code") or "").upper())["symbol"]
+	state["currencies"] = rows
+	return rows
+
+
+def currencies_index(state) -> dict:
+	return {str(row.get("code") or "").upper(): row for row in ensure_currencies(state)}
+
+
+def base_currency(state) -> dict:
+	code = base_code(state)
+	rows = ensure_currencies(state)
+	return next((r for r in rows if str(r.get("code") or "").upper() == code), rows[0])
+
+
+def rate_of(state, code="") -> float:
+	code = str(code or "").strip().upper() or base_code(state)
+	if code == base_code(state):
+		return 1.0
+	row = currencies_index(state).get(code)
+	if not row:
+		raise ValueError("العملة غير معروفة: %s" % code)
+	rate = num(row.get("rate"))
+	if rate <= 0:
+		raise ValueError("سعر صرف العملة %s غير محدد" % code)
+	return rate
+
+
+def display_currency(state, code="") -> dict:
+	code = str(code or "").strip().upper()
+	if not code or code == base_code(state):
+		return base_currency(state)
+	row = currencies_index(state).get(code)
+	if not row:
+		raise ValueError("العملة غير معروفة: %s" % code)
+	return row
+
+
+def display_factor(state, code="") -> float:
+	"""معامل تحويل مبلغ محفوظ بالعملة الأساسية إلى عملة العرض."""
+	row = display_currency(state, code)
+	return 1.0 / rate_of(state, row.get("code"))
+
+
+def convert(state, amount, from_code="", to_code="") -> float:
+	f = rate_of(state, from_code or base_code(state))
+	t = rate_of(state, to_code or base_code(state))
+	return round2(num(amount) * f / t)
+
+
+def currency_meta(state, code="") -> dict:
+	row = display_currency(state, code)
+	return {"code": row.get("code"), "symbol": row.get("symbol") or "",
+	        "name": row.get("name") or "", "rate": round(num(row.get("rate")), 6),
+	        "isBase": str(row.get("code")).upper() == base_code(state)}
 
 
 # ───────────────────────── أدوات الشجرة ─────────────────────────
@@ -195,11 +310,15 @@ def _natural(account, balance):
 	return balance if account.get("type") in DEBIT_TYPES else round2(-balance)
 
 
-def tree(state, date_from="", date_to="") -> list[dict]:
+def tree(state, date_from="", date_to="", currency="") -> list[dict]:
 	totals = totals_map(state, date_from, date_to)
+	show = display_currency(state, currency)
+	factor = 1.0 / rate_of(state, show.get("code"))
+	index = currencies_index(state)
 	out = []
 	for account in sorted(accounts(state), key=lambda a: str(a.get("code"))):
 		agg = aggregate(state, account, totals)
+		account_code = str(account.get("currency") or "").upper()
 		out.append({
 			"id": account.get("id"), "code": account.get("code"), "name": account.get("name"),
 			"nameEn": account.get("nameEn") or "", "type": account.get("type"),
@@ -208,13 +327,17 @@ def tree(state, date_from="", date_to="") -> list[dict]:
 			"nature": account.get("nature") or ("debit" if account.get("type") in DEBIT_TYPES else "credit"),
 			"partyType": account.get("partyType") or "", "active": account.get("active", True),
 			"description": account.get("description") or "", "level": account_level(state, account),
-			"debit": agg["debit"], "credit": agg["credit"], "balance": agg["balance"],
-			"naturalBalance": _natural(account, agg["balance"]),
+			"currency": account_code,
+			"currencySymbol": (index.get(account_code) or {}).get("symbol") or "",
+			"displayCurrency": show.get("code"), "displaySymbol": show.get("symbol") or "",
+			"debit": round2(agg["debit"] * factor), "credit": round2(agg["credit"] * factor),
+			"balance": round2(agg["balance"] * factor),
+			"naturalBalance": round2(_natural(account, agg["balance"]) * factor),
 		})
 	return out
 
 
-def summary(state) -> dict:
+def summary(state, currency="") -> dict:
 	accounts_index = accounts(state)
 	totals = totals_map(state)
 	buckets = {"asset": 0.0, "liability": 0.0, "equity": 0.0, "revenue": 0.0, "expense": 0.0}
@@ -229,10 +352,14 @@ def summary(state) -> dict:
 	for account in accounts_index:
 		if str(account.get("code")) in ("1101", "1102"):
 			cash += aggregate(state, account, totals)["balance"]
+	show = display_currency(state, currency)
+	factor = 1.0 / rate_of(state, show.get("code"))
+	conv = lambda value: round2(num(value) * factor)  # noqa: E731
 	return {
-		"assets": round2(buckets["asset"]), "liabilities": round2(buckets["liability"]),
-		"equity": round2(buckets["equity"]), "revenue": round2(buckets["revenue"]),
-		"expense": round2(buckets["expense"]), "profit": profit, "cash": round2(cash),
+		"assets": conv(buckets["asset"]), "liabilities": conv(buckets["liability"]),
+		"equity": conv(buckets["equity"]), "revenue": conv(buckets["revenue"]),
+		"expense": conv(buckets["expense"]), "profit": conv(profit), "cash": conv(cash),
+		"currency": currency_meta(state, show.get("code")),
 		"accounts": len(accounts_index), "groups": len([a for a in accounts_index if a.get("isGroup")]),
 		"vouchers": len(vouchers),
 		"posted": len([v for v in vouchers if v.get("status") == "posted"]),
@@ -266,6 +393,7 @@ def _clean_lines(lines) -> list[dict]:
 			"description": str(line.get("description") or "").strip(),
 			"debit": debit, "credit": credit,
 			"partyType": line.get("partyType") or "",
+			"partyId": str(line.get("partyId") or "").strip(),
 			"party": str(line.get("party") or "").strip(),
 			"dueDate": date_only(line.get("dueDate")),
 		})
@@ -292,6 +420,10 @@ def validate_voucher(state, payload, existing_id=None, require_balance=True) -> 
 			raise ValueError("لا يمكن أن يكون المبلغ سالبًا")
 		if line["debit"] and line["credit"]:
 			raise ValueError("لا يمكن إدخال مدين ودائن في نفس السطر")
+		# نوع الطرف يتبع الحساب: حسابات العملاء/الموردين/الموظفين تفرض نوعها تلقائيًا
+		account_party = account.get("partyType") or ""
+		if account_party:
+			line["partyType"] = account_party
 	debit = round2(sum(l["debit"] for l in lines))
 	credit = round2(sum(l["credit"] for l in lines))
 	if require_balance and round(abs(debit - credit), 2) > 0.009:
@@ -318,7 +450,7 @@ def post_voucher(state, voucher) -> dict:
 
 
 # ───────────────────────── كشف الحساب ─────────────────────────
-def statement(state, account_id, date_from="", date_to="") -> dict:
+def statement(state, account_id, date_from="", date_to="", currency="") -> dict:
 	account = by_id(state).get(account_id)
 	if not account:
 		raise ValueError("الحساب غير موجود")
@@ -349,13 +481,22 @@ def statement(state, account_id, date_from="", date_to="") -> dict:
 	for row in rows:
 		running = round2(running + row["amount"])
 		row["balance"] = running
+	total_debit = round2(sum(r["debit"] for r in rows))
+	total_credit = round2(sum(r["credit"] for r in rows))
+	show = display_currency(state, currency)
+	factor = 1.0 / rate_of(state, show.get("code"))
+	for row in rows:
+		for field in ("debit", "credit", "amount", "balance"):
+			row[field] = round2(num(row.get(field)) * factor)
 	return {
 		"account": {"id": account.get("id"), "code": account.get("code"), "name": account.get("name"),
-		            "type": account.get("type"), "isGroup": bool(account.get("isGroup"))},
+		            "type": account.get("type"), "isGroup": bool(account.get("isGroup")),
+		            "currency": str(account.get("currency") or "").upper()},
 		"from": date_only(date_from), "to": date_only(date_to),
-		"opening": round2(opening), "closing": round2(running),
-		"totalDebit": round2(sum(r["debit"] for r in rows)),
-		"totalCredit": round2(sum(r["credit"] for r in rows)),
+		"opening": round2(opening * factor), "closing": round2(running * factor),
+		"totalDebit": round2(total_debit * factor),
+		"totalCredit": round2(total_credit * factor),
+		"currency": currency_meta(state, show.get("code")),
 		"rows": rows,
 	}
 
@@ -387,6 +528,25 @@ def _account_rows(state, date_from="", date_to=""):
 
 
 def run_report(state, report_id, filters=None) -> dict:
+	"""تشغيل تقرير ثم تحويل كل مبالغه إلى عملة العرض المطلوبة."""
+	filters = filters or {}
+	result = _run_report_base(state, report_id, filters)
+	show = display_currency(state, filters.get("currency"))
+	factor = 1.0 / rate_of(state, show.get("code"))
+	money_keys = {c.get("key") for c in result.get("columns") or [] if c.get("type") == "money"}
+	if abs(factor - 1.0) > 1e-12:
+		for row in result.get("rows") or []:
+			for key in money_keys:
+				if key in row and row[key] not in ("", None):
+					row[key] = round2(num(row[key]) * factor)
+		for key in list((result.get("totals") or {}).keys()):
+			result["totals"][key] = round2(num(result["totals"].get(key)) * factor)
+	result["currency"] = currency_meta(state, show.get("code"))
+	result["moneyColumns"] = sorted(money_keys)
+	return result
+
+
+def _run_report_base(state, report_id, filters=None) -> dict:
 	filters = filters or {}
 	date_from = date_only(filters.get("from"))
 	date_to = date_only(filters.get("to"))
@@ -837,3 +997,200 @@ def payslip_payment_entries(slip, method=""):
 		("salariesPayable", num(slip.get("netSalary")), 0, "سداد صافي راتب — %s" % name),
 		(account_key, 0, num(slip.get("netSalary")), "صرف من %s — %s" % ("البنك" if account_key == "bank" else "الصندوق", name)),
 	]
+
+
+# ═════════════════════ تقسيم الحساب حسب العملات ═════════════════════
+def split_account_by_currency(state, account_id, codes) -> list[dict]:
+	"""تحويل حساب فرعي بلا حركة إلى حسابات فرعية بعملات مختلفة."""
+	rows = accounts(state)
+	account = next((a for a in rows if a.get("id") == account_id), None)
+	if not account:
+		raise ValueError("الحساب غير موجود")
+	if account.get("isGroup"):
+		raise ValueError("اختر حسابًا فرعيًا غير تجميعي")
+	has_moves = any(line.get("accountId") == account_id
+	                for v in state.get("vouchers") or [] for line in v.get("lines") or [])
+	if has_moves:
+		raise ValueError("الحساب عليه حركة محاسبية — أنشئ الحسابات الفرعية يدويًا أو رحّل الأرصدة أولًا")
+	if any((a.get("parentId") or "") == account_id for a in rows):
+		raise ValueError("الحساب لديه حسابات فرعية بالفعل")
+	index = currencies_index(state)
+	wanted = []
+	for code in codes or []:
+		code = str(code or "").strip().upper()
+		if not code or code in wanted:
+			continue
+		if code not in index:
+			raise ValueError("العملة غير معروفة: %s" % code)
+		wanted.append(code)
+	if not wanted:
+		raise ValueError("اختر عملة واحدة على الأقل")
+	created = []
+	for code in wanted:
+		currency = index[code]
+		child_code = next_code(state, account_id)
+		child = {
+			"id": "acc_%s" % child_code, "code": child_code,
+			"name": "%s - %s" % (account.get("name"), currency.get("name") or code),
+			"nameEn": "", "type": account.get("type"), "parentId": account_id,
+			"isGroup": False, "nature": account.get("nature") or "debit",
+			"partyType": account.get("partyType") or "", "description": "",
+			"currency": code, "active": True, "createdAt": datetime.now().isoformat(timespec="seconds"),
+		}
+		rows.append(child)
+		created.append(child)
+	# الحساب الأصلي يصبح تجميعيًا حتى لا تُسجَّل عليه حركة مزدوجة
+	account["isGroup"] = True
+	account["splitAt"] = datetime.now().isoformat(timespec="seconds")
+	return created
+
+
+# ═════════════════════ الإقفال السنوي ═════════════════════
+def _last_day(year, month) -> int:
+	return calendar.monthrange(int(year), int(month))[1]
+
+
+def fiscal_period(state, year) -> tuple[str, str]:
+	"""فترة السنة المالية حسب شهر بداية السنة في الإعدادات."""
+	year = int(year)
+	settings = state.get("settings") or {}
+	month = int(num(settings.get("fiscalYearStartMonth")) or 1)
+	month = min(max(month, 1), 12)
+	if month == 1:
+		return "%04d-01-01" % year, "%04d-12-31" % year
+	start = "%04d-%02d-01" % (year, month)
+	end_year, end_month = year + 1, month - 1
+	return start, "%04d-%02d-%02d" % (end_year, end_month, _last_day(end_year, end_month))
+
+
+def closed_years(state) -> list[dict]:
+	rows = ((state.get("settings") or {}).get("closedYears") or [])
+	return [row for row in rows if isinstance(row, dict) and row.get("year")]
+
+
+def period_locked(state, date) -> bool:
+	day = date_only(date)
+	if not day:
+		return False
+	return any(day <= str(row.get("to") or "") for row in closed_years(state))
+
+
+def locked_through(state) -> str:
+	days = [str(row.get("to") or "") for row in closed_years(state) if row.get("to")]
+	return max(days) if days else ""
+
+
+def year_end_preview(state, year, retained_id="") -> dict:
+	year = int(year)
+	start, end = fiscal_period(state, year)
+	entry = next((row for row in closed_years(state) if int(row.get("year") or 0) == year), None)
+	index = by_id(state)
+	retained = index.get(retained_id) if retained_id else account_for_code(state, "3102")
+	sums = totals_map(state, start, end)
+	rows, lines = [], []
+	revenue = expense = 0.0
+	for account in sorted(accounts(state), key=lambda a: str(a.get("code"))):
+		if account.get("isGroup") or account.get("type") not in ("revenue", "expense"):
+			continue
+		balance = _natural(account, aggregate(state, account, sums)["balance"])
+		if abs(balance) < 0.005:
+			continue
+		rows.append({"accountId": account.get("id"), "code": account.get("code"), "name": account.get("name"),
+		             "type": account.get("type"), "typeLabel": ACCOUNT_TYPES.get(account.get("type")),
+		             "balance": round2(balance),
+		             "entrySide": "credit" if account.get("type") == "expense" else "debit"})
+		if account.get("type") == "revenue":
+			revenue += balance
+			lines.append({"accountId": account.get("id"), "description": "إقفال إيراد — %s" % account.get("name"),
+			              "debit": round2(balance), "credit": 0.0})
+		else:
+			expense += balance
+			lines.append({"accountId": account.get("id"), "description": "إقفال مصروف — %s" % account.get("name"),
+			              "debit": 0.0, "credit": round2(balance)})
+	profit = round2(revenue - expense)
+	if retained and abs(profit) >= 0.005:
+		lines.append({"accountId": retained.get("id"),
+		              "description": ("صافي ربح السنة %d" if profit > 0 else "صافي خسارة السنة %d") % year,
+		              "debit": round2(-profit) if profit < 0 else 0.0,
+		              "credit": round2(profit) if profit > 0 else 0.0})
+	drafts = [v for v in state.get("vouchers") or []
+	          if (v.get("status") or "draft") == "draft" and start <= date_only(v.get("date")) <= end]
+	warnings = []
+	if entry:
+		warnings.append({"level": "info", "text": "السنة %d مقفلة بالفعل — القيد %s. يمكنك إعادة فتحها للتعديل."
+		                                        % (year, entry.get("voucherNumber") or entry.get("voucherId") or "")})
+	if drafts:
+		warnings.append({"level": "danger", "text": "يوجد %d سند مسودة في الفترة — رحّلها أو احذفها قبل الإقفال." % len(drafts)})
+	if not retained:
+		warnings.append({"level": "danger", "text": "حساب الأرباح المحتجزة غير موجود — اختر حسابًا صحيحًا."})
+	elif retained.get("isGroup"):
+		warnings.append({"level": "danger", "text": "حساب الأرباح المحتجزة المختار حساب رئيسي — اختر حسابًا فرعيًا."})
+	if not rows:
+		warnings.append({"level": "info", "text": "لا توجد أرصدة إيرادات أو مصروفات في هذه السنة — قد تكون مقفلة أو لا توجد حركة."})
+	profit_account = retained.get("name") if retained else ""
+	return {
+		"year": year, "from": start, "to": end, "closed": bool(entry), "closing": entry or None,
+		"retained": {"id": (retained or {}).get("id") or "", "code": (retained or {}).get("code") or "",
+		             "name": profit_account},
+		"revenue": round2(revenue), "expense": round2(expense), "profit": profit,
+		"rows": rows, "lines": lines, "warnings": warnings, "drafts": len(drafts),
+		"currency": currency_meta(state), "history": sorted(closed_years(state), key=lambda r: str(r.get("year")), reverse=True),
+		"lockedThrough": locked_through(state),
+	}
+
+
+def year_end_close(state, year, retained_id="", user="", notes="", force=False) -> dict:
+	preview = year_end_preview(state, year, retained_id)
+	if preview["closed"]:
+		raise ValueError("السنة %d مقفلة بالفعل — أعد فتحها أولًا" % int(year))
+	if not preview["retained"].get("id"):
+		raise ValueError("اختر حساب الأرباح المحتجزة أولًا")
+	if not preview["rows"]:
+		raise ValueError("لا توجد أرصدة إيرادات أو مصروفات لإقفالها في هذه السنة")
+	if preview["drafts"] and not force:
+		raise ValueError("يوجد %d سند مسودة في الفترة — رحّلها أو احذفها قبل الإقفال" % preview["drafts"])
+	day = preview["to"]
+	debit = round2(sum(num(l.get("debit")) for l in preview["lines"]))
+	credit = round2(sum(num(l.get("credit")) for l in preview["lines"]))
+	if abs(debit - credit) > 0.009:
+		raise ValueError("قيد الإقفال غير متوازن: مدين %s / دائن %s" % (debit, credit))
+	record = {
+		"id": "vc_close_%s" % uuid4().hex[:16], "type": "closing",
+		"number": next_voucher_number(state, "closing", day), "date": day,
+		"description": "إقفال السنة المالية %d — ترحيل الإيرادات والمصروفات إلى الأرباح المحتجزة" % int(year),
+		"reference": "", "branchId": "", "partyType": "", "party": "",
+		"currency": base_code(state), "notes": str(notes or ""),
+		"lines": [dict(l, partyType="", party="", dueDate="") for l in preview["lines"]],
+		"debit": debit, "credit": credit, "status": "posted", "isOpening": False,
+		"auto": True, "event": "year_end", "eventLabel": "إقفال سنوي",
+		"source": "year_end:%d" % int(year), "sourceType": "accounts", "sourceId": str(year),
+		"createdAt": datetime.now().isoformat(timespec="seconds"),
+		"postedAt": datetime.now().isoformat(timespec="seconds"), "createdBy": user or "system",
+	}
+	state.setdefault("vouchers", []).append(record)
+	settings = state.setdefault("settings", {})
+	settings["closedYears"] = [row for row in closed_years(state) if int(row.get("year") or 0) != int(year)] + [{
+		"year": int(year), "from": preview["from"], "to": preview["to"],
+		"voucherId": record["id"], "voucherNumber": record["number"],
+		"revenue": preview["revenue"], "expense": preview["expense"], "profit": preview["profit"],
+		"retainedAccountId": preview["retained"].get("id"),
+		"closedAt": datetime.now().isoformat(timespec="seconds"), "closedBy": user or "",
+	}]
+	settings["lockedThrough"] = locked_through(state)
+	return {"preview": preview, "voucher": record}
+
+
+def year_end_reopen(state, year, user="", reason="") -> dict:
+	row = next((r for r in closed_years(state) if int(r.get("year") or 0) == int(year)), None)
+	if not row:
+		raise ValueError("السنة %d غير مقفلة" % int(year))
+	source = "year_end:%d" % int(year)
+	voucher = next((v for v in state.get("vouchers") or [] if v.get("source") == source), None)
+	if voucher and (voucher.get("status") or "draft") != "cancelled":
+		voucher["status"] = "cancelled"
+		voucher["cancelledAt"] = datetime.now().isoformat(timespec="seconds")
+		voucher["cancelReason"] = str(reason or "إعادة فتح السنة المالية")
+	settings = state.setdefault("settings", {})
+	settings["closedYears"] = [r for r in closed_years(state) if int(r.get("year") or 0) != int(year)]
+	settings["lockedThrough"] = locked_through(state)
+	return {"year": int(year), "voucher": voucher, "lockedThrough": settings["lockedThrough"]}

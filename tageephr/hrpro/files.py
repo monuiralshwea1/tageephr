@@ -205,6 +205,76 @@ def read_backup_file(name: str) -> bytes:
 		return handle.read()
 
 
+# ───────────────────────── الأرشيف الإلكتروني ─────────────────────────
+ARCHIVE_SUBDIR = ("private", "files", "tageephr", "archive")
+ARCHIVE_MAX_BYTES = 25 * 1024 * 1024
+ARCHIVE_EXTENSIONS = {
+	"pdf", "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg",
+	"doc", "docx", "xls", "xlsx", "csv", "txt", "rtf", "ppt", "pptx", "odt", "ods",
+	"zip", "rar", "7z", "eml", "msg",
+}
+
+
+def archive_dir() -> str:
+	path = frappe.get_site_path(*ARCHIVE_SUBDIR)
+	os.makedirs(path, exist_ok=True)
+	return path
+
+
+def archive_extension(filename: str) -> str:
+	name = os.path.basename(str(filename or "")).strip()
+	ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+	return "".join(ch for ch in ext if ch.isalnum())[:8]
+
+
+def save_archive_file(content: bytes, filename: str, item_id: str = "") -> dict:
+	"""حفظ ملف الأرشيف داخل private/files/tageephr/archive وإرجاع بياناته الوصفية."""
+	if not content:
+		raise ValueError("الملف فارغ")
+	if len(content) > ARCHIVE_MAX_BYTES:
+		raise ValueError("حجم الملف يتجاوز الحد الأقصى %s ميجابايت" % (ARCHIVE_MAX_BYTES // (1024 * 1024)))
+	ext = archive_extension(filename)
+	if ext and ext not in ARCHIVE_EXTENSIONS:
+		raise ValueError("نوع الملف غير مسموح: %s" % ext)
+	from .utils import uid
+
+	stored = "%s.%s" % (item_id or uid("ar_"), ext) if ext else (item_id or uid("ar_"))
+	stored = "".join(ch for ch in stored if ch.isalnum() or ch in "._-")
+	with open(os.path.join(archive_dir(), stored), "wb") as handle:
+		handle.write(content)
+	return {"storedName": stored, "fileName": os.path.basename(str(filename or stored))[:180],
+	        "ext": ext, "size": len(content)}
+
+
+def archive_file_path(stored_name: str) -> str:
+	safe = os.path.basename(str(stored_name or ""))
+	if not safe:
+		return ""
+	path = os.path.join(archive_dir(), safe)
+	return path if os.path.exists(path) else ""
+
+
+def delete_archive_file(stored_name: str) -> bool:
+	try:
+		path = archive_file_path(stored_name)
+		if path:
+			os.remove(path)
+			return True
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "TageepHR delete archive file")
+	return False
+
+
+def archive_usage() -> int:
+	total = 0
+	for name in os.listdir(archive_dir()):
+		try:
+			total += os.path.getsize(os.path.join(archive_dir(), name))
+		except OSError:
+			continue
+	return total
+
+
 def restore_from_buffer(buffer: bytes, passphrase: str | None = None) -> dict:
 	text = buffer.decode("utf-8-sig", "replace")
 	try:

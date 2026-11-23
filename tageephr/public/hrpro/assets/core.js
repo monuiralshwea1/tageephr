@@ -216,6 +216,17 @@
         setTimeout(() => URL.revokeObjectURL(url), 2000);
     };
 
+    App.fetchBlob = async (path) => {
+        const response = await fetch(hrproUrl(path), { headers: { 'X-Hrpro-Token': App.token || '' } });
+        if (!response.ok) throw new Error('تعذر تحميل الملف');
+        return await response.blob();
+    };
+
+    App.blobUrl = async (path, type) => {
+        const blob = await App.fetchBlob(path);
+        return URL.createObjectURL(type ? new Blob([blob], { type }) : blob);
+    };
+
     App.downloadGet = async (path, filename) => {
         const response = await fetch(hrproUrl(path), { headers: { 'X-Hrpro-Token': App.token || '' } });
         if (!response.ok) throw new Error('فشل التنزيل');

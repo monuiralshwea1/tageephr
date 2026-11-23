@@ -8,7 +8,7 @@ import os
 import re
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import frappe
 from frappe import _
@@ -45,7 +45,8 @@ COLLECTION_MODULE = {
 	"insuranceRecords": "compensation",
 	"reportTemplates": "reports", "notifications": "notifications", "users": "users",
 	"settings": "settings", "auditLog": "audit",
-	"accounts": "accounts", "vouchers": "accounts",
+	"accounts": "accounts", "vouchers": "accounts", "parties": "accounts",
+	"archiveItems": "archive", "archiveCategories": "archive",
 }
 
 
@@ -2596,6 +2597,10 @@ def settings_save(ctx):
 		if isinstance(body["leavePolicy"].get("lateConversion"), dict):
 			s["leavePolicy"]["lateConversion"] = {**(s["leavePolicy"].get("lateConversion") or {}),
 			                                             **body["leavePolicy"]["lateConversion"]}
+	try:
+		accounting.ensure_currencies(s)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "TageepHR ensure currencies")
 	ctx.audit("update", "settings", "settings", "", "تحديث إعدادات النظام")
 	_commit(ctx)
 	return {"data": s["settings"], "payrollSettings": s.get("payrollSettings"),
@@ -2964,6 +2969,8 @@ def collection_delete(ctx, name, record_id):
 	ctx.state[name] = [r for r in rows or [] if r.get("id") != record_id]
 	if len(ctx.state[name]) == before:
 		raise ApiError("السجل غير موجود", 404)
+	if name == "archiveItems" and record.get("storedName"):
+		files.delete_archive_file(record.get("storedName"))
 	ctx.audit("delete", module, name, record_id, "حذف سجل %s" % name)
 	_commit(ctx)
 	return {"ok": True, "message": "تم الحذف"}
@@ -3032,6 +3039,48 @@ def _validate_record(state, name, record, existing_id=None):
 			raise ApiError("عدد الأيام لا يمكن أن يكون سالبًا")
 	if name in ("branches", "departments") and not record.get("name"):
 		raise ApiError("اسم الفرع/القسم مطلوب")
+	if name == "parties":
+		existing = next((p for p in state.get("parties") or [] if p.get("id") == existing_id), None) if existing_id else None
+		record["name"] = str(record.get("name") or (existing or {}).get("name") or "").strip()
+		if not record["name"]:
+			raise ApiError("اسم الطرف مطلوب")
+		record["type"] = str(record.get("type") or (existing or {}).get("type") or "customer").strip() or "customer"
+		if record["type"] not in ("customer", "supplier", "other"):
+			raise ApiError("نوع الطرف غير صالح")
+		if "active" not in record:
+			record["active"] = True
+		dup = next((p for p in state.get("parties") or []
+		            if str(p.get("name") or "").strip().lower() == record["name"].lower()
+		            and (p.get("type") or "customer") == record["type"] and p.get("id") != existing_id), None)
+		if dup:
+			raise ApiError("الطرف مسجل بالفعل: %s" % dup.get("name"))
+	if name == "archiveItems":
+		existing = next((r for r in state.get("archiveItems") or [] if r.get("id") == existing_id), None) if existing_id else None
+		for key in ("storedName", "fileName", "ext", "size", "mime", "archivedAt", "createdBy"):
+			if existing and key not in record:
+				record[key] = existing.get(key)
+		record["title"] = str(record.get("title") or (existing or {}).get("title") or "").strip()
+		if not record["title"]:
+			raise ApiError("عنوان الملف مطلوب")
+		record["kind"] = record.get("kind") if record.get("kind") in ARCHIVE_KINDS else "document"
+		record["status"] = record.get("status") if record.get("status") in ("active", "archived") else "active"
+		tags = record.get("tags")
+		if isinstance(tags, str):
+			tags = [part.strip() for part in tags.replace("،", ",").split(",") if part.strip()]
+		record["tags"] = [str(tag)[:40] for tag in (tags or [])][:20]
+		record["archivedAt"] = record.get("archivedAt") or engine._now()
+		employee = engine.find_employee(state, record.get("employeeId")) if record.get("employeeId") else None
+		if employee:
+			record["employeeId"] = employee.get("id")
+			record["employeeName"] = employee.get("name") or ""
+			record["employeeNumber"] = employee.get("employeeNumber") or ""
+			if not record.get("branchId"):
+				record["branchId"] = employee.get("branchId") or ""
+		branch = next((b for b in state.get("branches") or [] if b.get("id") == record.get("branchId")), None)
+		record["branchName"] = (branch or {}).get("name") or record.get("branchName") or ""
+		category = next((c for c in state.get("archiveCategories") or [] if c.get("id") == record.get("categoryId")), None)
+		record["categoryName"] = (category or {}).get("name") or ""
+		record["size"] = int(num(record.get("size")))
 
 
 # ═════════ توافق خلفي ═════════
@@ -3093,16 +3142,23 @@ def _vouchers_collection(ctx):
 	return rows
 
 
+def _ensure_period_open(state, date):
+	if accounting.period_locked(state, date):
+		raise ApiError("التاريخ %s يقع في فترة محاسبية مقفلة — أعد فتح السنة من تبويب «الإقفال السنوي»"
+		               % (date_only(date) or date), 409)
+
+
 @route("GET", r"/accounts/summary", permission=("accounts", "view"))
 def accounts_summary(ctx):
 	_accounts_collection(ctx)
-	return {"data": accounting.summary(ctx.state)}
+	return {"data": accounting.summary(ctx.state, ctx.query.get("currency") or "")}
 
 
 @route("GET", r"/accounts/tree", permission=("accounts", "view"))
 def accounts_tree(ctx):
 	_accounts_collection(ctx)
-	return {"data": accounting.tree(ctx.state, ctx.query.get("from") or "", ctx.query.get("to") or "")}
+	return {"data": accounting.tree(ctx.state, ctx.query.get("from") or "", ctx.query.get("to") or "",
+	                              ctx.query.get("currency") or "")}
 
 
 @route("GET", r"/accounts/next-code", permission=("accounts", "view"))
@@ -3223,6 +3279,9 @@ def accounts_create(ctx):
 			raise ApiError(str(exc))
 	if any(str(a.get("code")) == code for a in rows):
 		raise ApiError("كود الحساب مستخدم بالفعل: %s" % code)
+	account_currency = str(body.get("currency") or "").strip().upper()
+	if account_currency and account_currency not in accounting.currencies_index(ctx.state):
+		raise ApiError("عملة الحساب غير معروفة: %s" % account_currency)
 	is_group = bool(body.get("isGroup"))
 	record = {
 		"id": uid("acc_"), "code": code, "name": name,
@@ -3230,6 +3289,7 @@ def accounts_create(ctx):
 		"type": acct_type, "parentId": (parent or {}).get("id") or "",
 		"isGroup": is_group, "nature": body.get("nature") or ("debit" if acct_type in accounting.DEBIT_TYPES else "credit"),
 		"partyType": body.get("partyType") or "", "description": str(body.get("description") or "").strip(),
+		"currency": account_currency,
 		"active": body.get("active", True) is not False, "createdAt": engine._now(),
 		"createdBy": ctx.user.get("name"),
 	}
@@ -3273,6 +3333,11 @@ def accounts_update(ctx, account_id):
 	for key in ("nameEn", "description", "partyType"):
 		if key in body:
 			record[key] = str(body.get(key) or "").strip()
+	if "currency" in body:
+		account_currency = str(body.get("currency") or "").strip().upper()
+		if account_currency and account_currency not in accounting.currencies_index(ctx.state):
+			raise ApiError("عملة الحساب غير معروفة: %s" % account_currency)
+		record["currency"] = account_currency
 	if "nature" in body and body.get("nature"):
 		record["nature"] = body.get("nature")
 	if "active" in body:
@@ -3303,6 +3368,167 @@ def accounts_delete(ctx, account_id):
 	ctx.audit("delete", "accounts", "accounts", account_id, "حذف حساب %s" % record.get("name"))
 	_commit(ctx)
 	return {"ok": True, "message": "تم حذف الحساب"}
+
+
+# ═════════ إدارة العملات وأسعار الصرف ═════════
+def _currency_payload(ctx):
+	rows = accounting.ensure_currencies(ctx.state)
+	return {"currencies": rows, "base": accounting.base_currency(ctx.state),
+	        "baseCode": accounting.base_code(ctx.state), "settingsCurrency": (ctx.state.get("settings") or {}).get("currency") or ""}
+
+
+@route("GET", r"/currencies", permission=("accounts", "view"))
+def currencies_list(ctx):
+	return {"data": _currency_payload(ctx)}
+
+
+@route("GET", r"/currencies/convert", permission=("accounts", "view"))
+def currencies_convert(ctx):
+	amount = num(ctx.query.get("amount"))
+	try:
+		source = accounting.display_currency(ctx.state, ctx.query.get("from") or "")
+		target = accounting.display_currency(ctx.state, ctx.query.get("to") or "")
+		value = accounting.convert(ctx.state, amount, source.get("code"), target.get("code"))
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	return {"data": {"amount": amount, "result": value, "from": source, "to": target,
+	                "rate": round(num(source.get("rate")) / num(target.get("rate") or 1), 6)}}
+
+
+@route("POST", r"/currencies", permission=("accounts", "add"))
+def currencies_create(ctx):
+	rows = accounting.ensure_currencies(ctx.state)
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	code = str(body.get("code") or "").strip().upper()
+	if not re.match(r"^[A-Z]{2,5}$", code):
+		raise ApiError("كود العملة غير صالح — استخدم 2 إلى 5 أحرف إنجليزية مثل SAR")
+	if any(str(a.get("code") or "").upper() == code for a in rows):
+		raise ApiError("العملة مضافة بالفعل: %s" % code)
+	rate = num(body.get("rate"))
+	if rate <= 0:
+		raise ApiError("سعر الصرف يجب أن يكون أكبر من صفر")
+	preset = accounting._preset(code)
+	record = {"id": uid("cur_"), "code": code,
+	          "symbol": str(body.get("symbol") or preset.get("symbol") or code).strip(),
+	          "name": str(body.get("name") or preset.get("name") or code).strip(),
+	          "rate": rate, "active": True, "isBase": code == accounting.base_code(ctx.state),
+	          "createdAt": engine._now()}
+	rows.append(record)
+	ctx.state["currencies"] = rows
+	ctx.audit("create", "accounts", "currencies", record["id"], "إضافة عملة %s بسعر %s" % (code, rate))
+	_commit(ctx)
+	return {"data": record, "message": "تمت إضافة العملة"}
+
+
+@route("PUT", r"/currencies/(?P<currency_id>[^/]+)", permission=("accounts", "edit"))
+def currencies_update(ctx, currency_id):
+	rows = accounting.ensure_currencies(ctx.state)
+	record = next((c for c in rows if c.get("id") == currency_id or str(c.get("code")).upper() == currency_id.upper()), None)
+	if not record:
+		raise ApiError("العملة غير موجودة", 404)
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	if str(record.get("code")).upper() == accounting.base_code(ctx.state):
+		if "rate" in body and num(body.get("rate")) != 1:
+			raise ApiError("العملة الأساسية سعرها 1 دائمًا — غيّر العملة الأساسية من الإعدادات")
+		record["rate"] = 1.0
+	elif "rate" in body:
+		rate = num(body.get("rate"))
+		if rate <= 0:
+			raise ApiError("سعر الصرف يجب أن يكون أكبر من صفر")
+		record["rate"] = rate
+	for key in ("symbol", "name"):
+		if str(body.get(key) or "").strip():
+			record[key] = str(body.get(key)).strip()
+	if "active" in body:
+		record["active"] = bool(body.get("active"))
+	record["updatedAt"] = engine._now()
+	ctx.audit("update", "accounts", "currencies", record["id"], "تعديل عملة %s" % record.get("code"))
+	_commit(ctx)
+	return {"data": record, "message": "تم حفظ العملة"}
+
+
+@route("DELETE", r"/currencies/(?P<currency_id>[^/]+)", permission=("accounts", "delete"))
+def currencies_delete(ctx, currency_id):
+	rows = accounting.ensure_currencies(ctx.state)
+	record = next((c for c in rows if c.get("id") == currency_id), None)
+	if not record:
+		raise ApiError("العملة غير موجودة", 404)
+	code = str(record.get("code")).upper()
+	if code == accounting.base_code(ctx.state):
+		raise ApiError("لا يمكن حذف العملة الأساسية للنظام")
+	if any(str(a.get("currency") or "").upper() == code for a in accounting.accounts(ctx.state)):
+		raise ApiError("العملة مرتبطة بحسابات في شجرة الحسابات — أزل ربطها أولًا")
+	if any(str(v.get("currency") or "").upper() == code for v in ctx.state.get("vouchers") or []):
+		raise ApiError("العملة مستخدمة في سندات — أوقفها بدلًا من حذفها")
+	ctx.state["currencies"] = [c for c in rows if c.get("id") != record.get("id")]
+	ctx.audit("delete", "accounts", "currencies", record.get("id"), "حذف عملة %s" % code)
+	_commit(ctx)
+	return {"ok": True, "message": "تم حذف العملة"}
+
+
+@route("POST", r"/accounts/(?P<account_id>[^/]+)/currency-split", permission=("accounts", "edit"))
+def accounts_currency_split(ctx, account_id):
+	_accounts_collection(ctx)
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	try:
+		created = accounting.split_account_by_currency(ctx.state, account_id, body.get("currencies") or [])
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	ctx.audit("create", "accounts", "accounts", account_id, "تقسيم حساب حسب العملات (%s)" % len(created))
+	_commit(ctx)
+	return {"data": created, "message": "تم إنشاء %s حسابًا فرعيًا حسب العملات" % len(created)}
+
+
+# ═════════ الإقفال السنوي ═════════
+@route("GET", r"/accounting/year-end", permission=("accounts", "view"))
+def year_end_status(ctx):
+	_accounts_collection(ctx)
+	accounting.ensure_currencies(ctx.state)
+	year = int(num(ctx.query.get("year")) or datetime.now().year)
+	try:
+		data = accounting.year_end_preview(ctx.state, year, ctx.query.get("retainedAccountId") or "")
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	rows = ctx.state.get("accounts") or []
+	options = [{"id": a.get("id"), "code": a.get("code"), "name": a.get("name")}
+	           for a in rows if not a.get("isGroup") and a.get("type") == "equity"]
+	data["retainedOptions"] = options or [{"id": a.get("id"), "code": a.get("code"), "name": a.get("name")}
+	                                      for a in rows if not a.get("isGroup")]
+	return {"data": data}
+
+
+@route("POST", r"/accounting/year-end/close", permission=("accounts", "edit"))
+def year_end_close(ctx):
+	_accounts_collection(ctx)
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	year = int(num(body.get("year")) or datetime.now().year)
+	try:
+		result = accounting.year_end_close(ctx.state, year, body.get("retainedAccountId") or "",
+		                                   user=ctx.user.get("name"), notes=body.get("notes") or "",
+		                                   force=bool(body.get("force")))
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	ctx.audit("post", "accounts", "vouchers", result["voucher"]["id"], "إقفال السنة المالية %d" % year)
+	_commit(ctx)
+	return {"data": result, "message": "تم إقفال السنة %d وقفل الفترة حتى %s" % (year, result["voucher"]["date"])}
+
+
+@route("POST", r"/accounting/year-end/reopen", permission=("accounts", "edit"))
+def year_end_reopen(ctx):
+	_accounts_collection(ctx)
+	body = ctx.body if isinstance(ctx.body, dict) else {}
+	year = int(num(body.get("year")) or 0)
+	if not year:
+		raise ApiError("حدد السنة المالية")
+	try:
+		result = accounting.year_end_reopen(ctx.state, year, user=ctx.user.get("name"),
+		                                    reason=body.get("reason") or "")
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	ctx.audit("cancel", "accounts", "vouchers", (result.get("voucher") or {}).get("id") or str(year),
+	          "إعادة فتح السنة المالية %d" % year)
+	_commit(ctx)
+	return {"data": result, "message": "تم إعادة فتح السنة %d" % year}
 
 
 @route("GET", r"/vouchers", permission=("accounts", "view"))
@@ -3352,6 +3578,28 @@ def vouchers_get(ctx, voucher_id):
 
 def _prepare_voucher(ctx, payload, existing=None):
 	record = dict(existing or {})
+	base = accounting.base_code(ctx.state)
+	entered = str(payload.get("currency") or "").strip().upper()
+	lines = payload.get("lines") or record.get("lines") or []
+	foreign_debit = foreign_credit = 0.0
+	if entered and entered != base:
+		# المبالغ المُدخلة بعملة أجنبية تُحوَّل إلى العملة الأساسية قبل الحفظ،
+		# فتبقى كل الأرصدة والتقارير بعملة واحدة مع حفظ سعر الصرف للطباعة.
+		rate = accounting.rate_of(ctx.state, entered)
+		foreign_debit = round2(sum(num(line.get("debit")) for line in lines))
+		foreign_credit = round2(sum(num(line.get("credit")) for line in lines))
+		lines = [dict(line, debit=round2(num(line.get("debit")) * rate),
+		              credit=round2(num(line.get("credit")) * rate)) for line in lines]
+		record["exchangeRate"] = rate
+		record["foreignDebit"] = foreign_debit
+		record["foreignCredit"] = foreign_credit
+		if payload.get("date") or not record.get("date"):
+			record["fxDate"] = date_only(payload.get("date")) or today_iso()
+	else:
+		record["currency"] = entered or base
+		record["exchangeRate"] = 1.0
+		record.pop("foreignDebit", None)
+		record.pop("foreignCredit", None)
 	record.update({
 		"type": payload.get("type") or record.get("type") or "journal",
 		"date": date_only(payload.get("date")) or record.get("date") or today_iso(),
@@ -3359,11 +3607,13 @@ def _prepare_voucher(ctx, payload, existing=None):
 		"reference": str(payload.get("reference") or "").strip(),
 		"branchId": payload.get("branchId") or record.get("branchId") or "",
 		"partyType": payload.get("partyType") or "",
+		"partyId": str(payload.get("partyId") or "").strip(),
 		"party": str(payload.get("party") or "").strip(),
-		"currency": payload.get("currency") or ((ctx.state.get("settings") or {}).get("currency") or ""),
 		"notes": str(payload.get("notes") or "").strip(),
-		"lines": payload.get("lines") or record.get("lines") or [],
+		"lines": lines,
 	})
+	if not entered:
+		record["currency"] = base
 	if payload.get("number") is not None:
 		record["number"] = str(payload.get("number") or "").strip()
 	record["isOpening"] = record.get("type") == "opening"
@@ -3373,6 +3623,7 @@ def _prepare_voucher(ctx, payload, existing=None):
 @route("POST", r"/vouchers", permission=("accounts", "add"))
 def vouchers_create(ctx):
 	_vouchers_collection(ctx)
+	_ensure_period_open(ctx.state, ctx.body.get("date") or today_iso())
 	record = _prepare_voucher(ctx, ctx.body)
 	record["id"] = uid("vc_")
 	record["status"] = "posted" if ctx.body.get("post") else "draft"
@@ -3398,6 +3649,8 @@ def vouchers_update(ctx, voucher_id):
 		raise ApiError("السند غير موجود", 404)
 	if record.get("status") == "cancelled":
 		raise ApiError("السند ملغي — لا يمكن تعديله")
+	_ensure_period_open(ctx.state, record.get("date"))
+	_ensure_period_open(ctx.state, ctx.body.get("date") or record.get("date"))
 	updated = _prepare_voucher(ctx, ctx.body, record)
 	try:
 		accounting.validate_voucher(ctx.state, updated, voucher_id, require_balance=updated.get("status") == "posted"
@@ -3423,6 +3676,7 @@ def vouchers_post(ctx, voucher_id):
 		raise ApiError("السند غير موجود", 404)
 	if record.get("status") == "cancelled":
 		raise ApiError("السند ملغي — لا يمكن ترحيله")
+	_ensure_period_open(ctx.state, record.get("date"))
 	try:
 		accounting.post_voucher(ctx.state, record)
 	except ValueError as exc:
@@ -3438,6 +3692,7 @@ def vouchers_cancel(ctx, voucher_id):
 	record = next((v for v in rows if v.get("id") == voucher_id), None)
 	if not record:
 		raise ApiError("السند غير موجود", 404)
+	_ensure_period_open(ctx.state, record.get("date"))
 	record["status"] = "cancelled"
 	record["cancelledAt"] = engine._now()
 	ctx.audit("cancel", "accounts", "vouchers", voucher_id, "إلغاء السند %s" % record.get("number"))
@@ -3453,6 +3708,7 @@ def vouchers_delete(ctx, voucher_id):
 		raise ApiError("السند غير موجود", 404)
 	if (record.get("status") or "draft") == "posted":
 		raise ApiError("لا يمكن حذف سند مُرحّل — ألغِه أولًا")
+	_ensure_period_open(ctx.state, record.get("date"))
 	ctx.state["vouchers"] = [v for v in rows if v.get("id") != voucher_id]
 	ctx.audit("delete", "accounts", "vouchers", voucher_id, "حذف السند %s" % record.get("number"))
 	_commit(ctx)
@@ -3466,7 +3722,8 @@ def accounts_statement(ctx):
 	if not account_id:
 		raise ApiError("اختر الحساب أولًا")
 	try:
-		data = accounting.statement(ctx.state, account_id, ctx.query.get("from") or "", ctx.query.get("to") or "")
+		data = accounting.statement(ctx.state, account_id, ctx.query.get("from") or "", ctx.query.get("to") or "",
+		                            ctx.query.get("currency") or "")
 	except ValueError as exc:
 		raise ApiError(str(exc))
 	return {"data": data}
@@ -3501,6 +3758,291 @@ def accounting_reports_export(ctx):
 	if str(ctx.body.get("format") or "xlsx") in ("xlsx", "excel"):
 		return _download(files.build_xlsx(columns, result["rows"], result["title"]), "%s-%s.xlsx" % (report_id, stamp))
 	return _download(files.build_csv(columns, result["rows"]), "%s-%s.csv" % (report_id, stamp))
+
+
+# ═════════ أطراف السندات (عملاء / موردون / موظفون) ═════════
+PARTY_NAMES = {"": "بدون", "customer": "عميل", "supplier": "مورد", "employee": "موظف", "other": "أخرى"}
+
+
+@route("GET", r"/parties")
+def parties_lookup(ctx):
+	"""قائمة الأطراف للاختيار داخل السندات: الموظفون + العملاء والموردون المسجلون."""
+	if not (has_permission(ctx.user, "accounts", "view") or has_permission(ctx.user, "archive", "view")):
+		raise ApiError("لا تملك صلاحية لهذا الإجراء", 403)
+	state = ctx.state
+	ptype = str(ctx.query.get("type") or "").strip().lower()
+	needle = str(ctx.query.get("search") or "").strip().lower()
+	branch_names = {b.get("id"): b.get("name") for b in state.get("branches") or []}
+	preset = ROLE_PRESETS.get(ctx.user.get("role")) or {}
+	scoped_branch = ctx.user.get("branchId") if preset.get("branchScoped") else ""
+	out = []
+	if ptype in ("", "employee"):
+		for emp in state.get("employees") or []:
+			if emp.get("status") == "terminated":
+				continue
+			if scoped_branch and emp.get("branchId") != scoped_branch:
+				continue
+			out.append({"id": emp.get("id") or "", "type": "employee", "name": emp.get("name") or "",
+			            "code": emp.get("employeeNumber") or "", "phone": emp.get("phone") or "",
+			            "email": emp.get("email") or "", "branchId": emp.get("branchId") or "",
+			            "branchName": branch_names.get(emp.get("branchId")) or "",
+			            "jobTitle": emp.get("jobTitle") or "", "active": True})
+	if ptype in ("", "customer", "supplier", "other"):
+		for row in state.get("parties") or []:
+			row_type = row.get("type") or "customer"
+			if row.get("active") is False or (ptype and row_type != ptype):
+				continue
+			out.append({"id": row.get("id") or "", "type": row_type, "name": row.get("name") or "",
+			            "code": row.get("code") or "", "phone": row.get("phone") or "",
+			            "email": row.get("email") or "", "taxNumber": row.get("taxNumber") or "",
+			            "branchId": row.get("branchId") or "",
+			            "branchName": branch_names.get(row.get("branchId")) or "", "active": True})
+		# أسماء أطراف وردت في سندات سابقة ولم تُسجل في القائمة — تبقى قابلة للاختيار
+		if ptype:
+			known = {str(r.get("name") or "").strip().lower() for r in out}
+			for voucher in state.get("vouchers") or []:
+				pairs = [(voucher.get("party"), voucher.get("partyType"))]
+				pairs += [(line.get("party"), line.get("partyType")) for line in voucher.get("lines") or []]
+				for name, kind in pairs:
+					name = str(name or "").strip()
+					if not name or str(kind or "") != ptype or name.lower() in known:
+						continue
+					known.add(name.lower())
+					out.append({"id": "", "type": ptype, "name": name, "code": "", "legacy": True,
+					            "branchId": "", "branchName": "", "active": True})
+	if needle:
+		out = [r for r in out if needle in ("%s %s %s" % (r.get("name") or "", r.get("code") or "",
+		                                                    r.get("phone") or "")).lower()]
+	out.sort(key=lambda r: str(r.get("name") or ""))
+	counts = {key: len([r for r in out if r.get("type") == key]) for key in ("employee", "customer", "supplier", "other")}
+	return {"data": out, "types": PARTY_NAMES, "counts": counts}
+
+
+# ═════════ الأرشيف الإلكتروني ═════════
+ARCHIVE_KINDS = {"document": "مستند", "voucher": "سند محاسبي", "employee": "ملف موظف",
+                 "contract": "عقد", "other": "أخرى"}
+
+
+def _archive_rows(state):
+	rows = state.get("archiveItems")
+	if not isinstance(rows, list):
+		rows = []
+		state["archiveItems"] = rows
+	return rows
+
+
+def _archive_filter(state, query):
+	def q(key):
+		return str(query.get(key) or "").strip()
+
+	needle = q("q").lower()
+	category, kind = q("categoryId"), q("kind")
+	employee, branch, status = q("employeeId"), q("branchId"), q("status")
+	from_date, to_date = date_only(q("from")), date_only(q("to"))
+	issue_from, issue_to = date_only(q("issueFrom")), date_only(q("issueTo"))
+	tag = q("tags").lower()
+	out = []
+	for item in _archive_rows(state):
+		if status and (item.get("status") or "active") != status:
+			continue
+		if category and item.get("categoryId") != category:
+			continue
+		if kind and item.get("kind") != kind:
+			continue
+		if employee and item.get("employeeId") != employee:
+			continue
+		if branch and item.get("branchId") != branch:
+			continue
+		day = date_only(item.get("archivedAt")) or ""
+		if from_date and day and day < from_date:
+			continue
+		if to_date and day and day > to_date:
+			continue
+		issued = date_only(item.get("issueDate")) or ""
+		if issue_from and issued and issued < issue_from:
+			continue
+		if issue_to and issued and issued > issue_to:
+			continue
+		item_tags = " ".join(str(t) for t in item.get("tags") or []).lower()
+		if tag and tag not in item_tags:
+			continue
+		if needle:
+			haystack = " ".join(str(item.get(key) or "") for key in (
+				"title", "fileName", "documentNumber", "description", "employeeName", "employeeNumber",
+				"branchName", "categoryName", "voucherNumber", "reference", "notes")) + " " + item_tags
+			if needle not in haystack.lower():
+				continue
+		out.append(item)
+	sort_key = q("sort") or "archivedAt"
+	reverse = q("order") != "asc"
+	if sort_key == "size":
+		out.sort(key=lambda r: num(r.get(sort_key)), reverse=reverse)
+	else:
+		out.sort(key=lambda r: str(r.get(sort_key) or ""), reverse=reverse)
+	return out
+
+
+def _archive_facets(state, rows):
+	categories, branches, kinds, years = {}, {}, {}, {}
+	names = {c.get("id"): c.get("name") for c in state.get("archiveCategories") or []}
+	for item in rows:
+		cid = item.get("categoryId") or ""
+		if cid:
+			entry = categories.setdefault(cid, {"id": cid, "name": names.get(cid) or item.get("categoryName") or "غير مصنف", "count": 0})
+			entry["count"] += 1
+		bid = item.get("branchId") or ""
+		if bid:
+			entry = branches.setdefault(bid, {"id": bid, "name": item.get("branchName") or bid, "count": 0})
+			entry["count"] += 1
+		kind = item.get("kind") or "document"
+		kinds[kind] = kinds.get(kind, 0) + 1
+		year = str(date_only(item.get("archivedAt")) or "")[:4]
+		if year:
+			years[year] = years.get(year, 0) + 1
+	return {"categories": sorted(categories.values(), key=lambda r: -r["count"]),
+	        "branches": sorted(branches.values(), key=lambda r: r["name"]),
+	        "kinds": kinds, "years": years}
+
+
+@route("GET", r"/archive/items", permission=("archive", "view"))
+def archive_items(ctx):
+	rows = _archive_filter(ctx.state, ctx.query)
+	total = len(rows)
+	page = max(1, int(num(ctx.query.get("page")) or 1))
+	size = min(200, max(5, int(num(ctx.query.get("pageSize")) or 25)))
+	start = (page - 1) * size
+	return {"data": rows[start:start + size], "total": total, "page": page, "pageSize": size,
+	        "pages": max(1, (total + size - 1) // size),
+	        "facets": _archive_facets(ctx.state, rows), "kinds": ARCHIVE_KINDS}
+
+
+@route("GET", r"/archive/overview", permission=("archive", "view"))
+def archive_overview(ctx):
+	rows = _archive_rows(ctx.state)
+	today = today_iso()
+	soon = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+	expiring = [r for r in rows if r.get("expiryDate") and today <= (date_only(r["expiryDate"]) or "") <= soon]
+	month = today[:7]
+	by_category = {}
+	for item in rows:
+		key = item.get("categoryId") or ""
+		by_category[key] = by_category.get(key, 0) + 1
+	return {"data": {
+		"total": len(rows), "byCategory": by_category,
+		"size": sum(int(num(r.get("size"))) for r in rows),
+		"diskSize": files.archive_usage(),
+		"employees": len({r.get("employeeId") for r in rows if r.get("employeeId")}),
+		"vouchers": len([r for r in rows if r.get("kind") == "voucher" or r.get("voucherId")]),
+		"expiring": len(expiring),
+		"thisMonth": len([r for r in rows if str(date_only(r.get("archivedAt")) or "").startswith(month)]),
+		"categories": len(ctx.state.get("archiveCategories") or []),
+	}}
+
+
+@route("GET", r"/archive/employee-summary", permission=("archive", "view"))
+def archive_employee_summary(ctx):
+	state = ctx.state
+	branch_names = {b.get("id"): b.get("name") for b in state.get("branches") or []}
+	buckets = {}
+	for item in _archive_rows(state):
+		emp_id = item.get("employeeId") or ""
+		if not emp_id:
+			continue
+		bucket = buckets.setdefault(emp_id, {"employeeId": emp_id, "employeeName": item.get("employeeName") or "",
+		                                           "employeeNumber": item.get("employeeNumber") or "",
+		                                           "branchId": item.get("branchId") or "", "count": 0, "size": 0,
+		                                           "last": "", "expiring": 0})
+		bucket["count"] += 1
+		bucket["size"] += int(num(item.get("size")))
+		archived = date_only(item.get("archivedAt")) or ""
+		if archived > bucket["last"]:
+			bucket["last"] = archived
+		if item.get("expiryDate") and (date_only(item["expiryDate"]) or "") <= (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"):
+			bucket["expiring"] += 1
+	rows = []
+	for emp in state.get("employees") or []:
+		if emp.get("status") == "terminated":
+			continue
+		bucket = buckets.pop(emp.get("id"), {})
+		rows.append({"employeeId": emp.get("id"), "employeeName": emp.get("name") or "",
+		             "employeeNumber": emp.get("employeeNumber") or "", "branchId": emp.get("branchId") or "",
+		             "branchName": branch_names.get(emp.get("branchId")) or "", "jobTitle": emp.get("jobTitle") or "",
+		             "count": bucket.get("count", 0), "size": bucket.get("size", 0),
+		             "last": bucket.get("last", ""), "expiring": bucket.get("expiring", 0)})
+	rows.sort(key=lambda r: (-r["count"], r["employeeName"]))
+	return {"data": rows, "unlinked": len([r for r in _archive_rows(state) if not r.get("employeeId")])}
+
+
+@route("GET", r"/archive/vouchers", permission=("archive", "view"))
+def archive_vouchers(ctx):
+	needle = str(ctx.query.get("search") or "").strip().lower()
+	rows = []
+	for voucher in ctx.state.get("vouchers") or []:
+		row = {"id": voucher.get("id"), "number": voucher.get("number") or "",
+		       "date": date_only(voucher.get("date")), "type": voucher.get("type") or "",
+		       "typeLabel": (accounting.VOUCHER_TYPES.get(voucher.get("type")) or {}).get("label") or "",
+		       "party": voucher.get("party") or "", "amount": num(voucher.get("debit")),
+		       "status": voucher.get("status") or "draft"}
+		if needle and needle not in ("%s %s %s" % (row["number"], row["party"], voucher.get("description") or "")).lower():
+			continue
+		rows.append(row)
+	rows.sort(key=lambda r: (r.get("date") or "", r.get("number") or ""), reverse=True)
+	return {"data": rows[:400]}
+
+
+@route("POST", r"/archive/upload", permission=("archive", "add"))
+def archive_upload(ctx):
+	uploaded = ctx.body.get("__file") or {}
+	content = uploaded.get("content")
+	if not content:
+		raise ApiError("لم يتم اختيار ملف")
+	try:
+		meta = files.save_archive_file(content, uploaded.get("filename") or "file")
+	except ValueError as exc:
+		raise ApiError(str(exc))
+	ctx.audit("create", "archive", "archiveItems", "", "رفع ملف أرشيف %s" % meta.get("fileName"))
+	_commit(ctx)
+	return {"data": meta, "message": "تم رفع الملف"}
+
+
+@route("GET", r"/archive/file/(?P<item_id>[^/]+)", permission=("archive", "view"))
+def archive_download(ctx, item_id):
+	item = next((r for r in _archive_rows(ctx.state) if r.get("id") == item_id), None)
+	if not item:
+		raise ApiError("الملف غير موجود", 404)
+	path = files.archive_file_path(item.get("storedName") or "")
+	if not path:
+		raise ApiError("ملف الأرشيف غير موجود على الخادم", 404)
+	with open(path, "rb") as handle:
+		content = handle.read()
+	ctx.audit("view", "archive", "archiveItems", item_id, "تنزيل ملف أرشيف %s" % item.get("fileName"))
+	_commit(ctx)
+	return _download(content, os.path.basename(item.get("fileName") or path))
+
+
+@route("POST", r"/archive/export", permission=("archive", "view"))
+def archive_export(ctx):
+	rows = _archive_filter(ctx.state, ctx.body or {})
+	columns = [{"key": "title", "label": "العنوان"}, {"key": "categoryName", "label": "التصنيف"},
+	           {"key": "kindLabel", "label": "النوع"}, {"key": "employeeNumber", "label": "رقم الموظف"},
+	           {"key": "employeeName", "label": "الموظف"}, {"key": "branchName", "label": "الفرع"},
+	           {"key": "documentNumber", "label": "رقم المستند"}, {"key": "voucherNumber", "label": "رقم السند"},
+	           {"key": "archivedAt", "label": "تاريخ الأرشفة"}, {"key": "issueDate", "label": "تاريخ الإصدار"},
+	           {"key": "expiryDate", "label": "تاريخ الانتهاء"}, {"key": "sizeLabel", "label": "حجم الملف"},
+	           {"key": "tagsLabel", "label": "الوسوم"}, {"key": "description", "label": "الوصف"}]
+	mapped = [{"title": r.get("title") or "", "categoryName": r.get("categoryName") or "",
+	           "kindLabel": ARCHIVE_KINDS.get(r.get("kind") or "document", ""),
+	           "employeeNumber": r.get("employeeNumber") or "", "employeeName": r.get("employeeName") or "",
+	           "branchName": r.get("branchName") or "", "documentNumber": r.get("documentNumber") or "",
+	           "voucherNumber": r.get("voucherNumber") or "",
+	           "archivedAt": date_only(r.get("archivedAt")) or "", "issueDate": r.get("issueDate") or "",
+	           "expiryDate": r.get("expiryDate") or "",
+	           "sizeLabel": "%s KB" % int(int(num(r.get("size"))) / 1024) if r.get("size") else "",
+	           "tagsLabel": "، ".join(r.get("tags") or []), "description": r.get("description") or ""}
+	          for r in rows]
+	ctx.audit("export", "archive", "archiveItems", "", "تصدير %s ملف أرشيف" % len(mapped))
+	_commit(ctx)
+	return _download(files.build_xlsx(columns, mapped, "الأرشيف"), "archive-%s.xlsx" % time.strftime("%Y%m%d-%H%M%S"))
 
 
 # ═════════ المُوزّع ═════════

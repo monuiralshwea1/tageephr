@@ -680,7 +680,7 @@
                     ], rows: data.leaves, empty: 'لا توجد إجازات مسجلة'
                 });
             } else if (tab === 'docs') {
-                pane.innerHTML = `<div class="toolbar" style="padding:0 0 12px;border:0"><span class="grow"></span>${A.can('employees', 'edit') ? `<button class="btn btn-primary btn-sm" id="addDoc">${A.icon('plus')} إضافة مستند</button>` : ''}</div>`
+                pane.innerHTML = `<div class="toolbar" style="padding:0 0 12px;border:0">${A.can('archive', 'view') ? `<button class="btn btn-sm" id="empArchive">${A.icon('file')} أرشيف الموظف</button>` : ''}<span class="grow"></span>${A.can('employees', 'edit') ? `<button class="btn btn-primary btn-sm" id="addDoc">${A.icon('plus')} إضافة مستند</button>` : ''}</div>`
                     + A.table({
                         columns: [
                             { key: 'name', label: 'المستند' },
@@ -690,6 +690,11 @@
                             { key: 'notes', label: 'ملاحظات' }
                         ], rows: data.documents, actions: r => [{ title: 'حذف', icon: 'trash', action: 'delDoc' }], empty: 'لا توجد مستندات'
                     });
+                const archiveBtn = document.getElementById('empArchive');
+                if (archiveBtn) archiveBtn.onclick = () => {
+                    sessionStorage.setItem('tageep_archive_employee', emp.id);
+                    location.hash = '#/archive';
+                };
                 const addDoc = document.getElementById('addDoc');
                 if (addDoc) addDoc.onclick = () => A.formModal({
                     title: 'إضافة مستند',

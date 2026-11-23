@@ -21,7 +21,8 @@ COLLECTIONS = [
 	"tasks", "taskComments", "selfRequests",
 	"employeeTransfers", "employeePromotions", "fingerprintCommands",
 	"selfCredentials",
-	"accounts", "vouchers",
+	"accounts", "vouchers", "currencies", "parties",
+	"archiveItems", "archiveCategories",
 ]
 
 MODULES = {
@@ -40,6 +41,7 @@ MODULES = {
 	"audit": "سجل التدقيق",
 	"self": "الخدمة الذاتية",
 	"accounts": "إدارة الحسابات",
+	"archive": "الأرشيف الإلكتروني",
 }
 
 ROLE_PRESETS = {
@@ -48,21 +50,23 @@ ROLE_PRESETS = {
 		"dashboard": "all", "employees": "all", "organization": "all", "attendance": "all",
 		"leaves": "all", "tasks": "all", "payroll": "all", "compensation": "all",
 		"reports": "all", "notifications": "all", "audit": "view", "self": "all",
-		"accounts": "view"}},
+		"accounts": "view", "archive": "all"}},
 	"hr_officer": {"label": "أخصائي موارد بشرية", "branchScoped": True, "modules": {
 		"dashboard": "view", "employees": "all", "organization": "view", "attendance": "all",
 		"leaves": "all", "tasks": "all", "payroll": "view", "compensation": "all",
-		"reports": "view", "notifications": "all", "self": "all"}},
+		"reports": "view", "notifications": "all", "self": "all", "archive": "all"}},
 	"branch_manager": {"label": "مدير فرع", "branchScoped": True, "modules": {
 		"dashboard": "view", "employees": "view", "organization": "view", "attendance": "edit",
-		"leaves": "edit", "tasks": "all", "reports": "view", "notifications": "all", "self": "all"}},
+		"leaves": "edit", "tasks": "all", "reports": "view", "notifications": "all", "self": "all",
+		"archive": "view"}},
 	"accountant": {"label": "محاسب", "branchScoped": False, "modules": {
 		"dashboard": "view", "tasks": "view", "payroll": "all", "compensation": "all",
-		"reports": "view", "notifications": "all", "self": "all", "accounts": "all"}},
+		"reports": "view", "notifications": "all", "self": "all", "accounts": "all", "archive": "all"}},
 	"auditor": {"label": "مراجع", "branchScoped": False, "modules": {
 		"dashboard": "view", "employees": "view", "attendance": "view", "leaves": "view",
 		"tasks": "view", "payroll": "view", "compensation": "view", "reports": "view",
-		"audit": "view", "notifications": "view", "self": "view", "accounts": "view"}},
+		"audit": "view", "notifications": "view", "self": "view", "accounts": "view",
+		"archive": "view"}},
 	"employee": {"label": "موظف (خدمة ذاتية)", "branchScoped": True, "selfOnly": True,
 	             "modules": {"self": "all", "notifications": "view"}},
 }
@@ -133,6 +137,16 @@ DEFAULT_LEAVE_TYPES = [
 	{"id": "lt_death", "name": "إجازة وفاة", "daysPerYear": 5, "isPaid": True, "isCarryOver": False, "maxCarryOver": 0, "accrual": "annual", "color": "#334155", "requiresApproval": True, "countWeekends": False, "description": "وفاة أحد الأقارب من الدرجة الأولى"},
 ]
 
+DEFAULT_ARCHIVE_CATEGORIES = [
+	{"id": "arc_contracts", "name": "عقود واتفاقيات", "color": "#0d9488", "description": "عقود العمل والاتفاقيات والملاحق"},
+	{"id": "arc_ids", "name": "هويات ومستندات رسمية", "color": "#2563eb", "description": "الهويات والإقامات وجوازات السفر"},
+	{"id": "arc_vouchers", "name": "سندات وقيود محاسبية", "color": "#f59e0b", "description": "سندات القبض والصرف والقيود"},
+	{"id": "arc_invoices", "name": "فواتير ومستخلصات", "color": "#dc2626", "description": "فواتير الموردين والمستخلصات"},
+	{"id": "arc_certificates", "name": "شهادات وخطابات", "color": "#7c3aed", "description": "الشهادات العلمية وخطابات التعريف"},
+	{"id": "arc_correspondence", "name": "مراسلات إدارية", "color": "#0891b2", "description": "الخطابات والمراسلات الصادرة والواردة"},
+	{"id": "arc_other", "name": "ملفات أخرى", "color": "#64748b", "description": "ملفات غير مصنفة"},
+]
+
 DEFAULT_DOCUMENT_TYPES = [
 	{"id": "dt_id", "name": "الهوية الوطنية", "hasExpiry": True, "required": True},
 	{"id": "dt_iqama", "name": "الإقامة", "hasExpiry": True, "required": True},
@@ -158,8 +172,13 @@ def defaults_clone() -> dict:
 	state["documentTypes"] = json.loads(json.dumps(DEFAULT_DOCUMENT_TYPES))
 	state["branches"] = [branch]
 	state["users"] = []
-	from .accounting import default_accounts
+	from .accounting import default_accounts, ensure_currencies
 
 	state["accounts"] = default_accounts()
 	state["vouchers"] = []
+	state["currencies"] = []
+	state["parties"] = []
+	state["archiveItems"] = []
+	state["archiveCategories"] = json.loads(json.dumps(DEFAULT_ARCHIVE_CATEGORIES))
+	ensure_currencies(state)
 	return state

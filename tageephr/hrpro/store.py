@@ -20,7 +20,8 @@ import zlib
 
 import frappe
 
-from .defaults import COLLECTIONS, DEFAULT_LEAVE_POLICY, DEFAULT_LEAVE_TYPES, DEFAULT_DOCUMENT_TYPES, DEFAULT_PAYROLL_SETTINGS, DEFAULT_SETTINGS, defaults_clone
+from .defaults import (COLLECTIONS, DEFAULT_ARCHIVE_CATEGORIES, DEFAULT_LEAVE_POLICY, DEFAULT_LEAVE_TYPES,
+                       DEFAULT_DOCUMENT_TYPES, DEFAULT_PAYROLL_SETTINGS, DEFAULT_SETTINGS, defaults_clone)
 
 TABLE = "tabTageephr State"
 _SECRET_KEY = "__secret"
@@ -124,6 +125,8 @@ def load_state() -> dict:
 		state["leaveTypes"] = json.loads(json.dumps(DEFAULT_LEAVE_TYPES))
 	if not state.get("documentTypes"):
 		state["documentTypes"] = json.loads(json.dumps(DEFAULT_DOCUMENT_TYPES))
+	if not state.get("archiveCategories"):
+		state["archiveCategories"] = json.loads(json.dumps(DEFAULT_ARCHIVE_CATEGORIES))
 	if not state["settings"].get("attendanceStartDate"):
 		from .utils import today_iso
 
