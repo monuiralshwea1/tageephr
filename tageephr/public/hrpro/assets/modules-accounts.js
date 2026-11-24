@@ -519,7 +519,7 @@
             </div></div>`;
         document.getElementById('ptFilter').onchange = e => { filters.partyType = e.target.value; renderParties(body); };
         const searchInput = document.getElementById('ptSearch');
-        searchInput.oninput = () => { filters.partySearch = searchInput.value.trim(); renderParties(body); };
+        searchInput.oninput = () => A.keepFocus(() => { filters.partySearch = searchInput.value.trim(); renderParties(body); }, body);
         document.getElementById('ptRefresh').onclick = async () => { await loadParties(); renderParties(body); };
         if (canAdd) document.getElementById('ptAdd').onclick = () => partyModal(filters.partyType || 'customer', () => renderParties(body));
         body.querySelectorAll('[data-pt-edit]').forEach(b => b.onclick = () => {

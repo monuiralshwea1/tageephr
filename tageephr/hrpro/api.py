@@ -3882,28 +3882,6 @@ def _archive_filter(state, query):
 	return out
 
 
-def _archive_facets(state, rows):
-	categories, branches, kinds, years = {}, {}, {}, {}
-	names = {c.get("id"): c.get("name") for c in state.get("archiveCategories") or []}
-	for item in rows:
-		cid = item.get("categoryId") or ""
-		if cid:
-			entry = categories.setdefault(cid, {"id": cid, "name": names.get(cid) or item.get("categoryName") or "غير مصنف", "count": 0})
-			entry["count"] += 1
-		bid = item.get("branchId") or ""
-		if bid:
-			entry = branches.setdefault(bid, {"id": bid, "name": item.get("branchName") or bid, "count": 0})
-			entry["count"] += 1
-		kind = item.get("kind") or "document"
-		kinds[kind] = kinds.get(kind, 0) + 1
-		year = str(date_only(item.get("archivedAt")) or "")[:4]
-		if year:
-			years[year] = years.get(year, 0) + 1
-	return {"categories": sorted(categories.values(), key=lambda r: -r["count"]),
-	        "branches": sorted(branches.values(), key=lambda r: r["name"]),
-	        "kinds": kinds, "years": years}
-
-
 @route("GET", r"/archive/items", permission=("archive", "view"))
 def archive_items(ctx):
 	rows = _archive_filter(ctx.state, ctx.query)
@@ -3912,8 +3890,7 @@ def archive_items(ctx):
 	size = min(200, max(5, int(num(ctx.query.get("pageSize")) or 25)))
 	start = (page - 1) * size
 	return {"data": rows[start:start + size], "total": total, "page": page, "pageSize": size,
-	        "pages": max(1, (total + size - 1) // size),
-	        "facets": _archive_facets(ctx.state, rows), "kinds": ARCHIVE_KINDS}
+	        "pages": max(1, (total + size - 1) // size),}
 
 
 @route("GET", r"/archive/overview", permission=("archive", "view"))

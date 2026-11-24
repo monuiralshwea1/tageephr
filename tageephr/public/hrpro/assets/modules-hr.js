@@ -1101,9 +1101,68 @@
             const pane = document.getElementById('attPane');
             const filters = { from: A.monthStart(), to: A.today(), employeeId: '', status: '', branchId: '', shiftId: '' };
 
-            const renderDaily = async () => {
-                const result = await A.get(`/attendance/daily?from=${filters.from}&to=${filters.to}${filters.employeeId ? '&employeeId=' + filters.employeeId : ''}${filters.status ? '&status=' + filters.status : ''}${filters.branchId ? '&branchId=' + filters.branchId : ''}${filters.shiftId ? '&shiftId=' + filters.shiftId : ''}`);
-                const rows = result.data || [];
+            // نتائج التبويبات تُحفظ بعد أول تحميل: العودة إلى أي تبويب تعرضه فورًا،
+            // وبيانات التبويبات الأخرى تُحمّل في الخلفية بعد فتح الشاشة.
+            const store = { daily: new Map(), punches: null, corrections: null, devices: null };
+            const dailyPending = new Map();
+            let pendingPunches = null;
+            let pendingCorrections = null;
+            let pendingDevices = null;
+            let paintSeq = 0;
+            const startPaint = () => ++paintSeq;
+            const paint = (token, html) => { if (token === paintSeq) pane.innerHTML = html; };
+            const paintError = (token, err) => {
+                if (token === paintSeq) pane.innerHTML = `<div class="alert danger">${A.icon('alert')}<div>${h(err.message || 'تعذر تحميل البيانات')}</div></div>`;
+            };
+            const dailyQuery = () => `/attendance/daily?from=${filters.from}&to=${filters.to}${filters.employeeId ? '&employeeId=' + filters.employeeId : ''}${filters.status ? '&status=' + filters.status : ''}${filters.branchId ? '&branchId=' + filters.branchId : ''}${filters.shiftId ? '&shiftId=' + filters.shiftId : ''}`;
+            const loadDaily = (url, force = false) => {
+                if (force) store.daily.delete(url);
+                if (store.daily.has(url)) return Promise.resolve();
+                if (!dailyPending.has(url)) {
+                    dailyPending.set(url, A.get(url)
+                        .then(res => { store.daily.set(url, res.data || []); })
+                        .finally(() => { dailyPending.delete(url); }));
+                }
+                return dailyPending.get(url);
+            };
+            const loadPunches = (force = false) => {
+                if (force) { store.punches = null; pendingPunches = null; }
+                if (store.punches) return Promise.resolve();
+                if (!pendingPunches) {
+                    pendingPunches = A.get('/collections/attendanceRecords')
+                        .then(res => { store.punches = res.data || []; })
+                        .finally(() => { pendingPunches = null; });
+                }
+                return pendingPunches;
+            };
+            const loadCorrections = (force = false) => {
+                if (force) { store.corrections = null; pendingCorrections = null; }
+                if (store.corrections) return Promise.resolve();
+                if (!pendingCorrections) {
+                    pendingCorrections = A.get('/attendance/corrections')
+                        .then(res => { store.corrections = res.data || []; })
+                        .finally(() => { pendingCorrections = null; });
+                }
+                return pendingCorrections;
+            };
+            const loadDevices = (force = false) => {
+                if (force) { store.devices = null; pendingDevices = null; }
+                if (store.devices) return Promise.resolve();
+                if (!pendingDevices) {
+                    pendingDevices = A.get('/collections/fingerprintDevices')
+                        .then(res => { store.devices = res.data || []; })
+                        .finally(() => { pendingDevices = null; });
+                }
+                return pendingDevices;
+            };
+
+            const renderDaily = async (force = false) => {
+                const token = startPaint();
+                const url = dailyQuery();
+                if (!store.daily.has(url)) paint(token, A.loading());
+                try { await loadDaily(url, force); } catch (err) { paintError(token, err); return; }
+                if (token !== paintSeq) return;
+                const rows = store.daily.get(url) || [];
                 const periodCols = A.periodColumns(rows);
                 const summary = {
                     present: rows.filter(r => ['present', 'late', 'missing_punch'].includes(r.status)).length,
@@ -1172,7 +1231,7 @@
                     try {
                         const result = await A.post('/attendance/process', { from: filters.from, to: filters.to });
                         A.toast(`تمت معالجة ${result.summary.days} يوم حضور`);
-                        renderDaily();
+                        renderDaily(true);
                     } catch (err) { A.toast(err.message, 'error'); }
                 };
                 const convertBtn = document.getElementById('attConvert');
@@ -1183,15 +1242,15 @@
                     try {
                         const result = await A.post('/attendance/late-conversion/run', { year: parts[0], month: parts[1] });
                         A.toast(result.message);
-                        renderDaily();
+                        renderDaily(true);
                     } catch (err) { A.toast(err.message, 'error'); }
                 };
                 const correctBtn = document.getElementById('attCorrect');
-                if (correctBtn) correctBtn.onclick = () => openCorrectionModal(filters.employeeId || (A.options.employees()[0] || {}).value, A.today(), renderDaily);
+                if (correctBtn) correctBtn.onclick = () => openCorrectionModal(filters.employeeId || (A.options.employees()[0] || {}).value, A.today(), () => renderDaily(true));
                 A.bindActions({
-                    markPresent: id => quickCorrection(id, rows, 'present', renderDaily),
-                    markHalf: id => quickCorrection(id, rows, 'half_day', renderDaily),
-                    correct: id => { const row = rows.find(r => r.id === id); openCorrectionModal(row.empId, row.date, renderDaily); }
+                    markPresent: id => quickCorrection(id, rows, 'present', () => renderDaily(true)),
+                    markHalf: id => quickCorrection(id, rows, 'half_day', () => renderDaily(true)),
+                    correct: id => { const row = rows.find(r => r.id === id); openCorrectionModal(row.empId, row.date, () => renderDaily(true)); }
                 });
                 const printAttendance = () => A.printTable({
                     title: 'سجل الحضور',
@@ -1232,10 +1291,13 @@
                 } catch (err) { A.toast(err.message, 'error'); }
             };
 
-            const renderPunches = async () => {
-                const result = await A.get('/collections/attendanceRecords');
+            const renderPunches = async (force = false) => {
+                const token = startPaint();
+                if (!store.punches) paint(token, A.loading());
+                try { await loadPunches(force); } catch (err) { paintError(token, err); return; }
+                if (token !== paintSeq) return;
                 const from = filters.from; const to = filters.to;
-                const rows = (result.data || []).filter(r => {
+                const rows = store.punches.filter(r => {
                     const d = String(r.date || r.checkIn || r.punchTime || '').slice(0, 10);
                     return d >= from && d <= to;
                 }).map(r => {
@@ -1286,13 +1348,16 @@
                 document.getElementById('pExcel').onclick = () => exportPunches('xlsx');
                 document.getElementById('pCsv').onclick = () => exportPunches('csv');
                 document.getElementById('pPdf').onclick = printPunches;
-                document.getElementById('pRefresh').onclick = renderPunches;
+                document.getElementById('pRefresh').onclick = () => renderPunches(true);
                 ['pFrom', 'pTo'].forEach(id => { document.getElementById(id).onchange = () => { filters.from = document.getElementById('pFrom').value; filters.to = document.getElementById('pTo').value; renderPunches(); }; });
             };
 
-            const renderCorrections = async () => {
-                const result = await A.get('/attendance/corrections');
-                const rows = result.data || [];
+            const renderCorrections = async (force = false) => {
+                const token = startPaint();
+                if (!store.corrections) paint(token, A.loading());
+                try { await loadCorrections(force); } catch (err) { paintError(token, err); return; }
+                if (token !== paintSeq) return;
+                const rows = store.corrections;
                 pane.innerHTML = `
                     <div class="toolbar" style="padding:0 0 14px;border:0">
                         <span class="small muted">كل معالجات البصمات مع حالة الاعتماد والسبب</span>
@@ -1319,20 +1384,23 @@
                         empty: 'لا توجد معالجات بصمات'
                     })}`;
                 const add = document.getElementById('cAdd');
-                if (add) add.onclick = () => openCorrectionModal((A.options.employees()[0] || {}).value, A.today(), renderCorrections);
+                if (add) add.onclick = () => openCorrectionModal((A.options.employees()[0] || {}).value, A.today(), () => renderCorrections(true));
                 A.bindActions({
-                    approve: async id => { await A.put(`/attendance/corrections/${id}/approve`); A.toast('تم الاعتماد'); renderCorrections(); },
-                    reject: async id => { await A.put(`/attendance/corrections/${id}/reject`, { reason: 'رفض من شاشة الحضور' }); A.toast('تم الرفض'); renderCorrections(); },
+                    approve: async id => { await A.put(`/attendance/corrections/${id}/approve`); A.toast('تم الاعتماد'); renderCorrections(true); },
+                    reject: async id => { await A.put(`/attendance/corrections/${id}/reject`, { reason: 'رفض من شاشة الحضور' }); A.toast('تم الرفض'); renderCorrections(true); },
                     del: async id => {
                         if (!(await A.confirm({ title: 'حذف معالجة', message: 'سيتم حذف المعالجة وإعادة احتساب اليوم.', danger: true, confirmLabel: 'حذف' }))) return;
-                        await A.del('/attendance/corrections/' + id); A.toast('تم الحذف'); renderCorrections();
+                        await A.del('/attendance/corrections/' + id); A.toast('تم الحذف'); renderCorrections(true);
                     }
                 });
             };
 
-            const renderDevices = async () => {
-                const result = await A.get('/collections/fingerprintDevices');
-                const rows = result.data || [];
+            const renderDevices = async (force = false) => {
+                const token = startPaint();
+                if (!store.devices) paint(token, A.loading());
+                try { await loadDevices(force); } catch (err) { paintError(token, err); return; }
+                if (token !== paintSeq) return;
+                const rows = store.devices;
                 pane.innerHTML = `
                     <div class="toolbar" style="padding:0 0 14px;border:0">
                         <div class="alert" style="flex:1">${A.icon('router')}<div>لربط الأجهزة استخدم واجهة الاستقبال <code dir="ltr">POST /api/fingerprint/receive</code> عبر وسيط ADMS/Push، أو أرسل السجلات دفعة واحدة مع معرّف كل موظف.</div></div>
@@ -1362,7 +1430,7 @@
                     edit: id => deviceForm(rows.find(d => d.id === id)),
                     del: async id => {
                         if (!(await A.confirm({ title: 'حذف جهاز', message: 'هل تريد حذف جهاز البصمة؟', danger: true, confirmLabel: 'حذف' }))) return;
-                        await A.del('/collections/fingerprintDevices/' + id); A.toast('تم الحذف'); renderDevices();
+                        await A.del('/collections/fingerprintDevices/' + id); A.toast('تم الحذف'); renderDevices(true);
                     }
                 });
             };
@@ -1381,7 +1449,7 @@
                 onSubmit: async data => {
                     if (device) await A.put('/collections/fingerprintDevices/' + device.id, data);
                     else await A.post('/collections/fingerprintDevices', { ...data, status: 'offline' });
-                    A.closeModal(); A.toast('تم حفظ الجهاز'); renderDevices();
+                    A.closeModal(); A.toast('تم حفظ الجهاز'); renderDevices(true);
                 }
             });
 
@@ -1391,7 +1459,13 @@
                 else if (id === 'corrections') renderCorrections();
                 else renderDevices();
             });
-            renderDaily();
+            await renderDaily();
+            // تحميل مسبق صامت لبقية التبويبات بعد ظهور الشاشة حتى تُفتح فورًا
+            setTimeout(() => {
+                loadPunches().catch(() => {});
+                loadCorrections().catch(() => {});
+                loadDevices().catch(() => {});
+            }, 150);
         }
     });
 

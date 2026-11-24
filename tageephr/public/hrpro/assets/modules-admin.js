@@ -121,10 +121,37 @@
             const pane = document.getElementById('payPane');
             const filters = { periodId: '', status: '' };
 
-            const renderPayslips = async () => {
-                const [slipsRes, periodsRes] = await Promise.all([A.get('/collections/payslips'), A.get('/collections/payrollPeriods')]);
-                const periods = (periodsRes.data || []).sort((a, b) => (b.year - a.year) || (b.month - a.month));
-                let rows = (slipsRes.data || []).slice();
+            // الكشوف والفترات تُجلب مرة واحدة وتُحفظ في الذاكرة، فيظهر التبويب فورًا عند تبديله
+            // بدل انتظار الخادم في كل ضغطة، ويُلغى الحفظ فقط عند تعديل البيانات.
+            const store = { slips: null, periods: null };
+            let pendingData = null;
+            let paintSeq = 0;
+            const startPaint = () => ++paintSeq;
+            const paint = (token, html) => { if (token === paintSeq) pane.innerHTML = html; };
+            const paintError = (token, err) => {
+                if (token === paintSeq) pane.innerHTML = `<div class="alert danger">${A.icon('alert')}<div>${h(err.message || 'تعذر تحميل البيانات')}</div></div>`;
+            };
+            const loadPayrollData = (force = false) => {
+                if (force) { store.slips = null; store.periods = null; pendingData = null; }
+                if (store.slips && store.periods) return Promise.resolve();
+                if (!pendingData) {
+                    pendingData = Promise.all([A.get('/collections/payslips'), A.get('/collections/payrollPeriods')])
+                        .then(([slipsRes, periodsRes]) => {
+                            store.slips = slipsRes.data || [];
+                            store.periods = periodsRes.data || [];
+                        })
+                        .finally(() => { pendingData = null; });
+                }
+                return pendingData;
+            };
+
+            const renderPayslips = async (force = false) => {
+                const token = startPaint();
+                if (!(store.slips && store.periods)) paint(token, A.loading());
+                try { await loadPayrollData(force); } catch (err) { paintError(token, err); return; }
+                if (token !== paintSeq) return;
+                const periods = store.periods.slice().sort((a, b) => (b.year - a.year) || (b.month - a.month));
+                let rows = store.slips.slice();
                 if (filters.periodId) rows = rows.filter(s => s.periodId === filters.periodId);
                 if (filters.status) rows = rows.filter(s => s.status === filters.status);
                 rows.sort((a, b) => (b.year - a.year) || (b.month - a.month) || String(a.employeeName).localeCompare(String(b.employeeName), 'ar'));
@@ -187,7 +214,7 @@
                     };
                 });
                 const genBtn = document.getElementById('payGenerate');
-                if (genBtn) genBtn.onclick = () => generateModal(periods, renderPayslips);
+                if (genBtn) genBtn.onclick = () => generateModal(periods, () => renderPayslips(true));
                 const settingsBtn = document.getElementById('paySettingsShortcut');
                 if (settingsBtn) settingsBtn.onclick = () => {
                     view.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === 'settings'));
@@ -195,14 +222,14 @@
                 };
                 A.bindActions({
                     view: id => A.viewPayslip(id),
-                    edit: id => editPayslipModal(rows.find(r => r.id === id), renderPayslips),
+                    edit: id => editPayslipModal(rows.find(r => r.id === id), () => renderPayslips(true)),
                     approve: async id => {
-                        try { await A.post(`/payroll/payslips/${id}/approve`); A.toast('تم اعتماد الكشف'); renderPayslips(); } catch (err) { A.toast(err.message, 'error'); }
+                        try { await A.post(`/payroll/payslips/${id}/approve`); A.toast('تم اعتماد الكشف'); renderPayslips(true); } catch (err) { A.toast(err.message, 'error'); }
                     },
                     pay: async id => {
                         const slip = rows.find(r => r.id === id);
                         if (!(await A.confirm({ title: 'صرف الراتب', message: `سيتم صرف ${A.money(slip.netSalary)} للموظف ${h(slip.employeeName)} وتسجيل السداد والقيود المحاسبية.` }))) return;
-                        try { await A.post(`/payroll/payslips/${id}/pay`, { paymentMethod: 'bank' }); A.toast('تم تسجيل صرف الراتب'); renderPayslips(); } catch (err) { A.toast(err.message, 'error'); }
+                        try { await A.post(`/payroll/payslips/${id}/pay`, { paymentMethod: 'bank' }); A.toast('تم تسجيل صرف الراتب'); renderPayslips(true); } catch (err) { A.toast(err.message, 'error'); }
                     }
                 });
             };
@@ -273,10 +300,13 @@
                 };
             };
 
-            const renderPeriods = async () => {
-                const [periodsRes, slipsRes] = await Promise.all([A.get('/collections/payrollPeriods'), A.get('/collections/payslips')]);
-                const periods = (periodsRes.data || []).sort((a, b) => (b.year - a.year) || (b.month - a.month));
-                const slips = slipsRes.data || [];
+            const renderPeriods = async (force = false) => {
+                const token = startPaint();
+                if (!(store.slips && store.periods)) paint(token, A.loading());
+                try { await loadPayrollData(force); } catch (err) { paintError(token, err); return; }
+                if (token !== paintSeq) return;
+                const periods = store.periods.slice().sort((a, b) => (b.year - a.year) || (b.month - a.month));
+                const slips = store.slips;
                 pane.innerHTML = `
                     <div class="toolbar" style="padding:0 0 14px;border:0">
                         <span class="small muted">الفترة تحدد أيام العمل والعطلات وتُقفل بعد اعتماد كل الكشوف</span>
@@ -314,27 +344,28 @@
                         values: { month: String(now.getMonth() + 1), year: now.getFullYear() },
                         onSubmit: async data => {
                             await A.post('/payroll/periods', data);
-                            A.closeModal(); A.toast('تم إنشاء الفترة'); renderPeriods();
+                            A.closeModal(); A.toast('تم إنشاء الفترة'); renderPeriods(true);
                         }
                     });
                 };
                 A.bindActions({
                     generate: async id => {
                         if (!(await A.confirm({ title: 'توليد الكشوف', message: 'سيتم حساب الحضور والبدلات والسلف والغياب والتأخير وتوليد كشوف لكل الموظفين.' }))) return;
-                        try { const r = await A.post('/payroll/generate', { periodId: id }); A.toast(r.message); renderPeriods(); } catch (err) { A.toast(err.message, 'error'); }
+                        try { const r = await A.post('/payroll/generate', { periodId: id }); A.toast(r.message); renderPeriods(true); } catch (err) { A.toast(err.message, 'error'); }
                     },
                     close: async id => {
                         if (!(await A.confirm({ title: 'إغلاق الفترة', message: 'لن يمكن توليد أو تعديل كشوف بعد الإغلاق. تأكد من اعتماد كل الكشوف أولًا.', danger: true, confirmLabel: 'إغلاق' }))) return;
-                        try { const r = await A.post(`/payroll/periods/${id}/close`); A.toast(r.message); renderPeriods(); } catch (err) { A.toast(err.message, 'error'); }
+                        try { const r = await A.post(`/payroll/periods/${id}/close`); A.toast(r.message); renderPeriods(true); } catch (err) { A.toast(err.message, 'error'); }
                     },
                     del: async id => {
                         if (!(await A.confirm({ title: 'حذف الفترة', message: 'سيتم حذف الفترة فقط، وليس الكشوف المرتبطة.', danger: true, confirmLabel: 'حذف' }))) return;
-                        try { await A.del('/collections/payrollPeriods/' + id); A.toast('تم الحذف'); renderPeriods(); } catch (err) { A.toast(err.message, 'error'); }
+                        try { await A.del('/collections/payrollPeriods/' + id); A.toast('تم الحذف'); renderPeriods(true); } catch (err) { A.toast(err.message, 'error'); }
                     }
                 });
             };
 
             const renderSettings = async () => {
+                startPaint();
                 const ps = A.state.data.payrollSettings || {};
                 const field = (key, label, type = 'number', extra = {}) => {
                     const value = ps[key] !== undefined ? ps[key] : '';
@@ -422,6 +453,7 @@
             };
 
             const renderEos = async () => {
+                startPaint();
                 pane.innerHTML = `
                     <div class="alert mb">${A.icon('money')}<div>تُحسب المكافأة حسب نظام العمل: نصف شهر لكل سنة من أول 5 سنوات، وشهر كامل لكل سنة تالية، إضافة إلى قيمة أرصدة الإجازات غير المستخدمة.</div></div>
                     <div class="card card-pad">

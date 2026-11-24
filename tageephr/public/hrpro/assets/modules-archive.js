@@ -26,7 +26,7 @@
         txt: 'text/plain', csv: 'text/csv'
     };
 
-    const cache = { categories: [], employees: [], overview: null, items: [], total: 0, pages: 1, facets: {}, vouchers: [] };
+    const cache = { categories: [], employees: [], overview: null, items: [], total: 0, pages: 1 };
     const filters = {
         q: '', categoryId: '', kind: '', employeeId: '', branchId: '',
         from: '', to: '', tags: '', status: '', sort: 'archivedAt', order: 'desc'
@@ -63,9 +63,9 @@
         return A.date(day);
     };
 
-    function queryString(extra) {
+    function queryString() {
         const params = new URLSearchParams();
-        Object.entries({ ...filters, page, pageSize, ...(extra || {}) }).forEach(([key, value]) => {
+        Object.entries({ ...filters, page, pageSize }).forEach(([key, value]) => {
             if (value !== '' && value !== null && value !== undefined) params.set(key, value);
         });
         return params.toString();
@@ -124,7 +124,6 @@
         cache.items = res.data || [];
         cache.total = res.total || 0;
         cache.pages = res.pages || 1;
-        cache.facets = res.facets || {};
         page = res.page || page;
     }
 
@@ -247,14 +246,18 @@
             const item = cache.items.find(r => r.id === b.dataset.arcEdit);
             if (item) openItemModal(item);
         });
-        body.querySelectorAll('[data-arc-del]').forEach(b => b.onclick = () => deleteItem(b.dataset.arcDel, refresh));
+        body.querySelectorAll('[data-arc-del]').forEach(b => b.onclick = () => deleteItem(b.dataset.arcDel, () => refresh(true)));
     }
 
-    async function refresh() {
-        try {
-            await Promise.all([loadMeta(), loadItems()]);
-            render();
-        } catch (err) { A.toast(err.message, 'error'); }
+    // meta: أعد تحميل التصنيفات/الموظفين/الإحصاءات (بعد إضافة أو حذف) — لا كل ضغطة بحث
+    function refresh(meta) {
+        return A.keepFocus(async () => {
+            try {
+                if (meta) await loadMeta();
+                await loadItems();
+                render();
+            } catch (err) { A.toast(err.message, 'error'); }
+        }, container);
     }
 
     // ═══════════════ أرشيف الموظفين ═══════════════
@@ -541,7 +544,7 @@
                 }
                 modal.close();
                 A.toast(isEdit ? 'تم تحديث بيانات الملف' : 'تمت أرشفة الملف', 'success');
-                await refresh();
+                await refresh(true);
             } catch (err) {
                 A.toast(err.message, 'error');
             } finally {

@@ -8,7 +8,7 @@
 
 (function () {
     const A = window.App;
-    const GUIDE_URL = '/assets/tageephr/hrpro/assets/guide/guide.html';
+    const GUIDE_URL = '/assets/tageephr/hrpro/assets/guide/guide.html?v=3.1';
 
     A.registerRoutes([
         {

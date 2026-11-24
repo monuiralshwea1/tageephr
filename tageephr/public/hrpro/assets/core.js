@@ -142,6 +142,8 @@
         router: '<rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 17.5h.01M10 17.5h.01"/><path d="M12 14V6"/><path d="M8 6a4 4 0 018 0"/>'
     };
     App.icon = (name, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ICONS.sparkles}</svg>`;
+    // مؤشر تحميل فوري داخل تبويبات الوحدات — يظهر لحظة الضغط بدل انتظار الخادم
+    App.loading = () => `<div class="empty"><div class="spinner" style="border-color:var(--line);border-top-color:var(--brand)"></div></div>`;
 
     // ───────────── API ─────────────
     const HRPRO_BASE = window.HRPRO_API_BASE || '/api/method/tageephr.hrpro.api.dispatch';
@@ -225,6 +227,27 @@
     App.blobUrl = async (path, type) => {
         const blob = await App.fetchBlob(path);
         return URL.createObjectURL(type ? new Blob([blob], { type }) : blob);
+    };
+
+    // إعادة رسم المحتوى تُدمّر حقل الكتابة فيضيع التركيز — نحفظه مع موضع المؤشر ونعيده
+    App.keepFocus = (action, root) => {
+        const active = document.activeElement;
+        const text = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+        const seen = text && active.id && (!root || root.contains(active))
+            ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null;
+        const restore = () => {
+            if (!seen) return;
+            const next = document.getElementById(seen.id);
+            if (!next || (root && !root.contains(next))) return;
+            next.focus();
+            if (seen.start == null || typeof next.setSelectionRange !== 'function') return;
+            const max = (next.value || '').length;
+            try { next.setSelectionRange(Math.min(seen.start, max), Math.min(seen.end == null ? seen.start : seen.end, max)); } catch (_) { /* حقل غير نصي */ }
+        };
+        const result = action();
+        if (result && typeof result.then === 'function') return result.then(value => { restore(); return value; });
+        restore();
+        return result;
     };
 
     App.downloadGet = async (path, filename) => {
